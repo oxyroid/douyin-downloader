@@ -43,6 +43,35 @@ from utils.logger import setup_logger, set_console_log_level
 logger = setup_logger("Server")
 set_console_log_level(logging.INFO)
 
+
+def _count_manifest_lines(manifest_path: Path) -> int:
+    """统计 manifest 文件当前行数"""
+    if not manifest_path.exists():
+        return 0
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            return sum(1 for _ in f)
+    except Exception:
+        return 0
+
+
+def _read_new_manifest_entries(manifest_path: Path, skip_lines: int) -> list[dict]:
+    """读取 manifest 文件中从 skip_lines 之后新增的行"""
+    if not manifest_path.exists():
+        return []
+    entries = []
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for i, line in enumerate(f):
+                if i < skip_lines:
+                    continue
+                line = line.strip()
+                if line:
+                    entries.append(json.loads(line))
+    except Exception as e:
+        logger.warning("读取 manifest 新增条目失败: %s", e)
+    return entries
+
 app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse)
 
 # ── 全局单例 ──────────────────────────────────────────────
@@ -154,6 +183,11 @@ async def _run_download(task_id: str, req: DownloadRequest):
         cookie_manager = await _get_cookie_manager()
         database = await _get_database()
 
+        # 记录下载前 manifest 行数，用于识别本次下载新增的文件
+        download_dir = Path(config.get("path", "./Downloaded/"))
+        manifest_path = download_dir / "download_manifest.jsonl"
+        manifest_lines_before = _count_manifest_lines(manifest_path)
+
         result = await download_url(
             req.url,
             task_config,
@@ -172,21 +206,41 @@ async def _run_download(task_id: str, req: DownloadRequest):
                 message=f"成功 {result.success} / 失败 {result.failed} / 跳过 {result.skipped}",
             )
 
-            # ── Immich 上传 ──────────────────────────────
+            # ── Immich 上传：只上传本次下载产生的文件 ──
             immich = get_immich_uploader(config.get("immich", {}))
             if immich:
                 try:
-                    download_dir = Path(config.get("path", "./Downloaded/"))
-                    if download_dir.exists():
-                        immich_stats = await immich.upload_directory(download_dir)
+                    # 从 manifest 中读取本次下载新增的条目
+                    new_entries = _read_new_manifest_entries(manifest_path, manifest_lines_before)
+
+                    # 收集本次下载的所有文件路径
+                    new_files: list[Path] = []
+                    for entry in new_entries:
+                        for rel_path in entry.get("file_paths", []):
+                            full_path = download_dir / rel_path
+                            if full_path.exists():
+                                new_files.append(full_path)
+
+                    if new_files:
+                        immich_stats = await immich.upload_files(
+                            new_files, download_dir, force=True
+                        )
+                        restored = immich_stats.get("restored", 0)
+                        uploaded = immich_stats.get("uploaded", 0)
                         immich_msg = (
-                            f" | Immich: 上传 {immich_stats.get('uploaded', 0)}"
+                            f" | Immich: 上传 {uploaded}"
+                            f", 恢复 {restored}"
                             f", 重复 {immich_stats.get('duplicates', 0)}"
                             f", 失败 {immich_stats.get('failed', 0)}"
                         )
                         _tasks[task_id]["message"] += immich_msg
                         _tasks[task_id]["immich"] = immich_stats
                         logger.info("Immich 上传完成: %s", immich_stats)
+                    else:
+                        logger.info("本次下载无新文件需要上传到 Immich")
+                        _tasks[task_id]["immich"] = {
+                            "uploaded": 0, "restored": 0, "duplicates": 0, "failed": 0,
+                        }
                 except Exception as e:
                     logger.exception("Immich 上传失败")
                     _tasks[task_id]["message"] += f" | Immich 上传失败: {e}"
@@ -289,33 +343,36 @@ def _build_summary(info: dict) -> str:
         parts = []
         s, f, sk = info.get("success", 0), info.get("failed", 0), info.get("skipped", 0)
         if s:
-            parts.append(f"✅ {s}个下载成功")
+            parts.append(f"{s}个下载成功")
         if sk:
-            parts.append(f"⏭️ {sk}个已下载过，跳过")
+            parts.append(f"{sk}个已下载过，跳过")
         if f:
-            parts.append(f"❌ {f}个失败")
+            parts.append(f"{f}个失败")
         immich = info.get("immich", {})
         if immich:
             uploaded = immich.get("uploaded", 0)
+            restored = immich.get("restored", 0)
             duplicates = immich.get("duplicates", 0)
             im_failed = immich.get("failed", 0)
             if uploaded:
-                parts.append(f"📤 {uploaded}个已上传Immich")
+                parts.append(f"{uploaded}个已上传Immich")
+            if restored:
+                parts.append(f"{restored}个已从Immich垃圾箱恢复")
             if duplicates:
-                parts.append(f"☁️ Immich中已有{duplicates}个")
+                parts.append(f"Immich中已有{duplicates}个")
             if im_failed:
-                parts.append(f"⚠️ Immich上传失败{im_failed}个")
-        return "\n".join(parts) if parts else "✅ 完成"
+                parts.append(f"Immich上传失败{im_failed}个")
+        return "\n".join(parts) if parts else "完成"
     elif status == "failed":
         msg = info.get("message", "未知错误")
         # 截断过长的错误信息
         if len(msg) > 80:
             msg = msg[:77] + "..."
-        return f"❌ 失败: {msg}"
+        return f"失败: {msg}"
     elif status == "running":
-        return "⏳ 下载中..."
+        return "下载中..."
     else:
-        return "⏳ 排队中..."
+        return "排队中..."
 
 
 @app.get("/health")
@@ -326,6 +383,72 @@ async def health_check():
         "status": "ok",
         "immich_enabled": immich is not None,
     }
+
+
+@app.api_route("/reset", methods=["GET", "POST"])
+async def reset_downloads():
+    """
+    清理 downloads 目录、manifest 和数据库下载记录，
+    使下次请求时下载器不会跳过已有文件，能重新下载并上传到 Immich。
+    """
+    import shutil
+
+    config = await _get_config()
+    download_dir = Path(config.get("path", "./Downloaded/"))
+
+    removed_files = 0
+    removed_dirs = 0
+
+    # 1. 清理下载目录中的所有子目录（按作者名分的文件夹）
+    if download_dir.exists():
+        for child in list(download_dir.iterdir()):
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child)
+                    removed_dirs += 1
+                elif child.is_file():
+                    child.unlink()
+                    removed_files += 1
+            except Exception as e:
+                logger.warning("清理失败: %s → %s", child, e)
+
+    # 2. 清理数据库下载记录
+    database = await _get_database()
+    db_cleared = False
+    if database:
+        try:
+            await database.clear_downloads()
+            db_cleared = True
+        except Exception as e:
+            logger.warning("清理数据库记录失败: %s", e)
+
+    # 3. 清空内存中的任务缓存
+    _tasks.clear()
+    _url_to_task.clear()
+
+    logger.info(
+        "Reset 完成: 删除 %d 个目录 + %d 个文件, 数据库%s",
+        removed_dirs, removed_files, "已清理" if db_cleared else "未清理",
+    )
+
+    result = {
+        "status": "ok",
+        "removed_dirs": removed_dirs,
+        "removed_files": removed_files,
+        "db_cleared": db_cleared,
+    }
+
+    parts = []
+    if removed_dirs or removed_files:
+        parts.append(f"已清理 {removed_dirs}个目录 + {removed_files}个文件")
+    else:
+        parts.append("下载目录已为空")
+    if db_cleared:
+        parts.append("数据库记录已清空")
+    parts.append("下次请求将重新下载并上传到Immich")
+    result["summary"] = "\n".join(parts)
+
+    return result
 
 
 @app.on_event("shutdown")

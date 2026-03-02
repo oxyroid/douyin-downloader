@@ -108,7 +108,7 @@ curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx&sync=1"
     "status": "completed",
     "url": "https://v.douyin.com/xxxxxxxx",
     "message": "成功 1 / 失败 0 / 跳过 0 | Immich: 上传 2, 重复 0, 失败 0",
-    "summary": "✅ 1个下载成功\n📤 2个已上传Immich"
+    "summary": "1个下载成功\n2个已上传Immich"
 }
 ```
 
@@ -145,6 +145,26 @@ curl http://localhost:8000/task/a1b2c3d4e5f6
 curl http://localhost:8000/health
 ```
 
+### GET/POST `/reset` — 重置下载记录
+
+清理下载目录、数据库记录和内存缓存，使下次请求时重新下载并上传到 Immich。适用于在 Immich 中手动删除文件后需要重新上传的场景。
+
+```bash
+curl http://localhost:8000/reset
+```
+
+**响应示例：**
+
+```json
+{
+    "status": "ok",
+    "removed_dirs": 3,
+    "removed_files": 1,
+    "db_cleared": true,
+    "summary": "已清理 3个目录 + 1个文件\n数据库记录已清空\n下次请求将重新下载并上传到Immich"
+}
+```
+
 ## 📱 iOS 快捷指令配置
 
 创建快捷指令，在抖音分享页面一键下载并上传到 Immich：
@@ -160,6 +180,8 @@ curl http://localhost:8000/health
    - 内容：上一步的 `summary` 值
 
 > 💡 通过 Cloudflare Tunnel 等方式暴露服务后，可在外网使用。
+>
+> 💡 如果在 Immich 中删除了文件后需要重新上传，先调用 `/reset` 清理下载记录，再重新分享链接即可。
 
 ## ⚙️ 配置说明
 
@@ -220,8 +242,8 @@ docker compose restart
 | 层级 | 机制 | 粒度 | 持久性 |
 |------|------|------|--------|
 | **API 层** | 内存中 URL → task_id 映射 | URL 级别 | 容器重启后重置 |
-| **下载器层** | SQLite + 本地文件检测 | aweme_id 级别 | 持久化（数据库 + 文件） |
-| **Immich 层** | 文件 checksum 校验 | 文件内容级别 | 持久化（Immich 数据库） |
+| **下载器层** | SQLite + 本地文件检测 | aweme_id 级别 | 持久化（可通过 `/reset` 清除） |
+| **Immich 层** | 文件 checksum 校验 + 垃圾箱恢复 | 文件内容级别 | 持久化（Immich 数据库） |
 
 ## 🔨 本地开发
 

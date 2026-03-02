@@ -201,5 +201,12 @@ class Database:
                 'updated_at': row[10],
             }
 
+    async def clear_downloads(self):
+        """清空 aweme 表和 download_history 表的所有记录"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('DELETE FROM aweme')
+            await db.execute('DELETE FROM download_history')
+            await db.commit()
+
     async def close(self):
         pass
