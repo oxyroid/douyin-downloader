@@ -1,0 +1,23 @@
+services:
+  douyin-downloader:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: douyin-downloader
+    ports:
+      - "8000:8000"
+    volumes:
+      # 下载文件持久化到宿主机
+      - ./downloads:/app/Downloaded
+      # 配置文件挂载（宿主机修改后重启容器生效）
+      - ./app/config.yml:/app/config.yml:ro
+    environment:
+      - DY_CONFIG_PATH=config.yml
+      # Immich 配置已移至 config.yml，以下环境变量作为备用/覆盖
+      - IMMICH_API_URL=http://host.docker.internal:2283
+      - IMMICH_API_KEY=${IMMICH_API_KEY}
+      # 如需 transcript 功能，取消下行注释
+      # - OPENAI_API_KEY=sk-xxxx
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped

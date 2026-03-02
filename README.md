@@ -1,1 +1,243 @@
-# douyin-downloader
+# Douyin Downloader — Docker HTTP API + Immich 集成
+
+基于 [douyin-downloader V2.0](./app/README.md) 封装的 **Docker 化 HTTP 服务**，提供 RESTful API 接口用于下载抖音视频/图文，支持自动上传到 [Immich](https://immich.app/) 自建相册，并可通过 iOS 快捷指令一键触发。
+
+## ✨ 功能特性
+
+- 🐳 **Docker 一键部署** — `docker compose up -d` 即可运行
+- 🌐 **HTTP API** — FastAPI 提供 REST 接口，支持异步/同步下载
+- 📱 **iOS 快捷指令** — GET 接口 + `sync=1` 参数，分享链接即可触发下载并收到通知
+- 📤 **Immich 自动上传** — 下载完成后自动上传到 Immich，按作者分相册（`douyin-作者名`）
+- 🔄 **三层去重** — API 层（URL 去重）→ 下载器层（SQLite + 本地文件）→ Immich 层（checksum）
+- 🔧 **全部可配置** — 所有参数均可通过 `config.yml` 或环境变量配置
+
+## 📁 项目结构
+
+```
+├── app/                        # 应用代码
+│   ├── server.py               # FastAPI HTTP 服务
+│   ├── immich_uploader.py      # Immich 上传模块
+│   ├── config.example.yml      # 配置模板
+│   └── ...                     # 下载器核心模块
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example                # 环境变量模板
+└── .gitignore
+```
+
+## 🚀 快速开始
+
+### 1. 准备配置
+
+```bash
+# 复制配置模板
+cp app/config.example.yml app/config.yml
+
+# 复制环境变量模板
+cp .env.example .env
+```
+
+### 2. 获取 Cookies
+
+抖音下载需要有效的 Cookies。推荐使用自动方式获取：
+
+```bash
+cd app
+pip install -r requirements.txt
+pip install playwright
+python -m playwright install chromium
+python -m tools.cookie_fetcher --config config.yml
+```
+
+在浏览器中登录抖音后，回到终端按回车，Cookies 会自动写入 `config.yml`。
+
+### 3. 配置 Immich（可选）
+
+如果你有自建的 Immich 实例，可以在 `config.yml` 中启用自动上传：
+
+```yaml
+immich:
+  enabled: true
+  api_url: 'http://localhost:2283'   # Immich 地址
+  api_key: 'your_api_key_here'       # Immich → 用户设置 → API Keys
+```
+
+或者通过 `.env` 文件配置（`config.yml` 优先，环境变量作为备用）：
+
+```bash
+IMMICH_API_KEY=your_api_key_here
+```
+
+### 4. 启动服务
+
+```bash
+docker compose up -d
+```
+
+验证服务是否正常：
+
+```bash
+curl http://localhost:8000/health
+# {"status": "ok", "immich_enabled": true}
+```
+
+## 📡 API 接口
+
+### GET `/d` — 快捷下载（推荐）
+
+最简单的下载接口，适合 iOS 快捷指令或浏览器直接调用。
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `url` | string | ✅ | 抖音链接（需 URL 编码） |
+| `sync` | bool | ❌ | `1`=同步等待完成，`0`=异步后台执行（默认） |
+
+```bash
+# 异步下载
+curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx"
+
+# 同步下载（等待完成后返回结果）
+curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx&sync=1"
+```
+
+**同步响应示例：**
+
+```json
+{
+    "task_id": "a1b2c3d4e5f6",
+    "status": "completed",
+    "url": "https://v.douyin.com/xxxxxxxx",
+    "message": "成功 1 / 失败 0 / 跳过 0 | Immich: 上传 2, 重复 0, 失败 0",
+    "summary": "✅ 1个下载成功\n📤 2个已上传Immich"
+}
+```
+
+### POST `/download` — 异步下载
+
+```bash
+curl -X POST http://localhost:8000/download \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://v.douyin.com/xxxxxxxx"}'
+```
+
+**请求体参数：**
+
+| 参数 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `url` | string | ✅ | 抖音链接 |
+| `mode` | string[] | ❌ | 下载模式，如 `["post"]` |
+| `number_post` | int | ❌ | 下载数量限制，`0` = 全部 |
+| `thread` | int | ❌ | 并发数 |
+
+### POST `/download/sync` — 同步下载
+
+参数同上，等待下载完成后返回结果。
+
+### GET `/task/{task_id}` — 查询任务状态
+
+```bash
+curl http://localhost:8000/task/a1b2c3d4e5f6
+```
+
+### GET `/health` — 健康检查
+
+```bash
+curl http://localhost:8000/health
+```
+
+## 📱 iOS 快捷指令配置
+
+创建快捷指令，在抖音分享页面一键下载并上传到 Immich：
+
+1. **新建快捷指令**，添加「接收输入」动作
+2. **添加「获取 URL 内容」动作**（不是「打开 URL」）
+   - URL：`https://your-domain.com/d?url=分享输入&sync=1`
+   - 方法：GET
+3. **添加「获取词典值」动作**
+   - 从「URL 内容」获取键 `summary` 的值
+4. **添加「显示通知」动作**
+   - 标题：抖音下载
+   - 内容：上一步的 `summary` 值
+
+> 💡 通过 Cloudflare Tunnel 等方式暴露服务后，可在外网使用。
+
+## ⚙️ 配置说明
+
+### `config.yml` 主要配置项
+
+```yaml
+# ── 下载器核心 ──────────────────
+path: ./Downloaded/              # 下载目录
+thread: 5                        # 并发下载数
+retry_times: 3                   # 失败重试次数
+database: true                   # 启用 SQLite 去重
+
+# ── HTTP 服务 ──────────────────
+server:
+  host: 0.0.0.0                  # 监听地址
+  port: 8000                     # 监听端口
+
+# ── Immich 集成 ────────────────
+immich:
+  enabled: true                  # 是否启用 Immich 上传
+  api_url: ''                    # Immich API 地址（留空则读环境变量 IMMICH_API_URL）
+  api_key: ''                    # Immich API Key（留空则读环境变量 IMMICH_API_KEY）
+  album_prefix: 'douyin-'        # 相册名前缀（按作者分相册：douyin-作者名）
+  device_id: 'douyin-downloader' # Immich 设备标识
+  upload_timeout: 600            # 单文件上传超时（秒）
+  upload_extensions:             # 上传的文件类型白名单
+    - .mp4
+    - .jpg
+    # ... 更多格式见 config.example.yml
+```
+
+### 环境变量
+
+| 变量 | 说明 | 默认值 |
+|------|------|--------|
+| `DY_CONFIG_PATH` | 配置文件路径 | `config.yml` |
+| `IMMICH_API_URL` | Immich API 地址（config.yml 优先） | — |
+| `IMMICH_API_KEY` | Immich API Key（config.yml 优先） | — |
+
+### `docker-compose.yml` 说明
+
+```yaml
+volumes:
+  - ./downloads:/app/Downloaded     # 下载文件持久化
+  - ./app/config.yml:/app/config.yml:ro  # 配置文件挂载
+```
+
+修改 `config.yml` 后需重启容器生效：
+
+```bash
+docker compose restart
+```
+
+## 🔄 去重机制
+
+三层去重确保不会重复下载和上传：
+
+| 层级 | 机制 | 粒度 | 持久性 |
+|------|------|------|--------|
+| **API 层** | 内存中 URL → task_id 映射 | URL 级别 | 容器重启后重置 |
+| **下载器层** | SQLite + 本地文件检测 | aweme_id 级别 | 持久化（数据库 + 文件） |
+| **Immich 层** | 文件 checksum 校验 | 文件内容级别 | 持久化（Immich 数据库） |
+
+## 🔨 本地开发
+
+```bash
+cd app
+pip install -r requirements.txt
+pip install fastapi uvicorn[standard]
+
+# 直接运行
+python server.py
+
+# 或使用 uvicorn（支持热重载）
+uvicorn server:app --host 0.0.0.0 --port 8000 --reload
+```
+
+## 📝 致谢
+
+- 核心下载器基于 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) V2.0
+- 照片管理使用 [Immich](https://immich.app/) 自托管方案

@@ -1,0 +1,11 @@
+.git
+app/myenv
+app/Downloaded
+app/__pycache__
+app/**/__pycache__
+downloads
+data
+*.pyc
+*.db
+.DS_Store
+.env
