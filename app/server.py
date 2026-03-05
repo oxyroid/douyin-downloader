@@ -73,6 +73,28 @@ def _read_new_manifest_entries(manifest_path: Path, skip_lines: int) -> list[dic
         logger.warning("读取 manifest 新增条目失败: %s", e)
     return entries
 
+
+def _find_manifest_entries_by_url(manifest_path: Path, url: str) -> list[dict]:
+    """从完整 manifest 中查找与给定 URL 匹配的条目（按 aweme_id 或 url 字段匹配）"""
+    if not manifest_path.exists():
+        return []
+    entries = []
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                entry = json.loads(line)
+                # 匹配方式: URL 包含 aweme_id，或 manifest 中记录的 url 与请求 URL 相关
+                entry_url = entry.get("url", "")
+                aweme_id = entry.get("aweme_id", "")
+                if (aweme_id and aweme_id in url) or (entry_url and entry_url == url):
+                    entries.append(entry)
+    except Exception as e:
+        logger.warning("查找 manifest 条目失败: %s", e)
+    return entries
+
 app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse)
 
 # ── 全局单例 ──────────────────────────────────────────────
@@ -248,13 +270,26 @@ async def _run_download(task_id: str, req: DownloadRequest):
                     _tasks[task_id]["message"] += f" | Immich 上传失败: {e}"
 
             # ── Telegram 上传 ──
+            # 不管是否有新下载，都扫描 manifest 中所有匹配的文件发送到 Telegram
             tg = get_telegram_uploader(config.get("telegram", {}))
             if tg:
                 try:
-                    if new_files:
+                    # 优先使用本次新下载的文件；若无则按 URL 匹配已有记录
+                    tg_entries = new_entries if new_entries else _find_manifest_entries_by_url(manifest_path, req.url)
+                    tg_files: list[Path] = []
+                    if new_entries:
+                        tg_files = list(new_files)
+                    else:
+                        for entry in tg_entries:
+                            for rel_path in entry.get("file_paths", []):
+                                full_path = download_dir / rel_path
+                                if full_path.exists():
+                                    tg_files.append(full_path)
+
+                    if tg_files:
                         tg_stats = await tg.upload_files(
-                            new_files, download_dir,
-                            manifest_entries=new_entries,
+                            tg_files, download_dir,
+                            manifest_entries=tg_entries,
                         )
                         tg_msg = (
                             f" | Telegram: 发送 {tg_stats.get('sent', 0)}"
@@ -265,7 +300,7 @@ async def _run_download(task_id: str, req: DownloadRequest):
                         _tasks[task_id]["telegram"] = tg_stats
                         logger.info("Telegram 发送完成: %s", tg_stats)
                     else:
-                        logger.info("本次下载无新文件需要发送到 Telegram")
+                        logger.info("manifest 中无可发送文件")
                         _tasks[task_id]["telegram"] = {
                             "sent": 0, "skipped": 0, "failed": 0,
                         }
