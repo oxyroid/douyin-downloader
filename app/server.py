@@ -38,6 +38,7 @@ from auth import CookieManager
 from storage import Database
 from cli.main import download_url
 from immich_uploader import get_immich_uploader
+from telegram_uploader import get_telegram_uploader
 from utils.logger import setup_logger, set_console_log_level
 
 logger = setup_logger("Server")
@@ -209,21 +210,19 @@ async def _run_download(task_id: str, req: DownloadRequest):
                 message=f"成功 {result.success} / 失败 {result.failed} / 跳过 {result.skipped}",
             )
 
-            # ── Immich 上传：只上传本次下载产生的文件 ──
+            # ── 收集本次下载产生的新文件 ──
+            new_entries = _read_new_manifest_entries(manifest_path, manifest_lines_before)
+            new_files: list[Path] = []
+            for entry in new_entries:
+                for rel_path in entry.get("file_paths", []):
+                    full_path = download_dir / rel_path
+                    if full_path.exists():
+                        new_files.append(full_path)
+
+            # ── Immich 上传 ──
             immich = get_immich_uploader(config.get("immich", {}))
             if immich:
                 try:
-                    # 从 manifest 中读取本次下载新增的条目
-                    new_entries = _read_new_manifest_entries(manifest_path, manifest_lines_before)
-
-                    # 收集本次下载的所有文件路径
-                    new_files: list[Path] = []
-                    for entry in new_entries:
-                        for rel_path in entry.get("file_paths", []):
-                            full_path = download_dir / rel_path
-                            if full_path.exists():
-                                new_files.append(full_path)
-
                     if new_files:
                         immich_stats = await immich.upload_files(
                             new_files, download_dir, force=True
@@ -247,6 +246,32 @@ async def _run_download(task_id: str, req: DownloadRequest):
                 except Exception as e:
                     logger.exception("Immich 上传失败")
                     _tasks[task_id]["message"] += f" | Immich 上传失败: {e}"
+
+            # ── Telegram 上传 ──
+            tg = get_telegram_uploader(config.get("telegram", {}))
+            if tg:
+                try:
+                    if new_files:
+                        tg_stats = await tg.upload_files(
+                            new_files, download_dir,
+                            manifest_entries=new_entries,
+                        )
+                        tg_msg = (
+                            f" | Telegram: 发送 {tg_stats.get('sent', 0)}"
+                            f", 跳过 {tg_stats.get('skipped', 0)}"
+                            f", 失败 {tg_stats.get('failed', 0)}"
+                        )
+                        _tasks[task_id]["message"] += tg_msg
+                        _tasks[task_id]["telegram"] = tg_stats
+                        logger.info("Telegram 发送完成: %s", tg_stats)
+                    else:
+                        logger.info("本次下载无新文件需要发送到 Telegram")
+                        _tasks[task_id]["telegram"] = {
+                            "sent": 0, "skipped": 0, "failed": 0,
+                        }
+                except Exception as e:
+                    logger.exception("Telegram 发送失败")
+                    _tasks[task_id]["message"] += f" | Telegram 发送失败: {e}"
         else:
             _tasks[task_id].update(status="failed", message="下载失败或链接无效")
 
@@ -357,6 +382,14 @@ def _build_summary(info: dict) -> str:
                 parts.append(f"Immich中已有{duplicates}个")
             if im_failed:
                 parts.append(f"Immich上传失败{im_failed}个")
+        tg = info.get("telegram", {})
+        if tg:
+            tg_sent = tg.get("sent", 0)
+            tg_failed = tg.get("failed", 0)
+            if tg_sent:
+                parts.append(f"{tg_sent}个已发送Telegram")
+            if tg_failed:
+                parts.append(f"Telegram发送失败{tg_failed}个")
         return "\n".join(parts) if parts else "完成"
     elif status == "failed":
         msg = info.get("message", "未知错误")
@@ -374,9 +407,11 @@ def _build_summary(info: dict) -> str:
 async def health_check():
     config = await _get_config()
     immich = get_immich_uploader(config.get("immich", {}))
+    tg = get_telegram_uploader(config.get("telegram", {}))
     return {
         "status": "ok",
         "immich_enabled": immich is not None,
+        "telegram_enabled": tg is not None,
     }
 
 
@@ -451,6 +486,9 @@ async def shutdown_event():
     immich = get_immich_uploader()
     if immich:
         await immich.close()
+    tg = get_telegram_uploader()
+    if tg:
+        await tg.close()
 
 
 if __name__ == "__main__":

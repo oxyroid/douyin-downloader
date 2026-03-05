@@ -80,6 +80,15 @@ immich:
     - .heic
     - .heif
 
+telegram:
+  enabled: false
+  bot_token: ''       # 从 @BotFather 获取，或从环境变量 TELEGRAM_BOT_TOKEN 读取
+  chat_id: ''         # 目标 Channel/Group ID (如 "@my_channel" 或 "-100xxxx")，或从环境变量 TELEGRAM_CHAT_ID 读取
+  api_base: 'https://api.telegram.org'   # 可自定义用于代理
+  caption_template: '{desc}'             # 消息标题模板，支持 {desc} {author} {date} {tags}
+  send_cover: true                       # 是否同时发送封面图
+  upload_timeout: 600
+
 cookies:
   msToken: YOUR_MS_TOKEN
   ttwid: YOUR_TTWID

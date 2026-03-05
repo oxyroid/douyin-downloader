@@ -1,6 +1,6 @@
-# Douyin Downloader — Docker HTTP API + Immich 集成
+# Douyin Downloader — Docker HTTP API + Immich/Telegram 集成
 
-基于 [douyin-downloader V2.0](./app/README.md) 封装的 **Docker 化 HTTP 服务**，提供 RESTful API 接口用于下载抖音视频/图文，支持自动上传到 [Immich](https://immich.app/) 自建相册，并可通过 iOS 快捷指令一键触发。
+基于 [douyin-downloader V2.0](./app/README.md) 封装的 **Docker 化 HTTP 服务**，提供 RESTful API 接口用于下载抖音视频/图文，支持自动上传到 [Immich](https://immich.app/) 自建相册和 [Telegram](https://telegram.org/) Channel，并可通过 iOS 快捷指令一键触发。
 
 ## ✨ 功能特性
 
@@ -8,6 +8,7 @@
 - 🌐 **HTTP API** — FastAPI 提供 REST 接口，支持异步/同步下载
 - 📱 **iOS 快捷指令** — GET 接口 + `sync=1` 参数，分享链接即可触发下载并收到通知
 - 📤 **Immich 自动上传** — 下载完成后自动上传到 Immich，按作者分相册（`douyin-作者名`）
+- 📲 **Telegram 自动推送** — 下载完成后自动发送到 Telegram Channel/Group，附带标题和标签
 - 🔄 **三层去重** — API 层（URL 去重）→ 下载器层（SQLite + 本地文件）→ Immich 层（checksum）
 - 🔧 **全部可配置** — 所有参数均可通过 `config.yml` 或环境变量配置
 
@@ -17,6 +18,7 @@
 ├── app/                        # 应用代码
 │   ├── server.py               # FastAPI HTTP 服务
 │   ├── immich_uploader.py      # Immich 上传模块
+│   ├── telegram_uploader.py    # Telegram 推送模块
 │   ├── config.example.yml      # 配置模板
 │   └── ...                     # 下载器核心模块
 ├── Dockerfile
@@ -68,6 +70,30 @@ immich:
 IMMICH_API_KEY=your_api_key_here
 ```
 
+### 3.5 配置 Telegram（可选）
+
+如果你想将下载的内容自动推送到 Telegram Channel/Group：
+
+1. 在 Telegram 中找 [@BotFather](https://t.me/BotFather) 创建 Bot，获取 `bot_token`
+2. 将 Bot 添加到目标 Channel/Group 并设为管理员
+3. 在 `config.yml` 中配置：
+
+```yaml
+telegram:
+  enabled: true
+  bot_token: '123456:ABC-DEF...'     # Bot Token
+  chat_id: '@my_channel'             # Channel 用户名或 chat_id (如 -100xxxx)
+  caption_template: '{desc}'         # 消息标题模板
+  send_cover: true                   # 是否同时发送封面图
+```
+
+或者通过环境变量配置：
+
+```bash
+TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
+TELEGRAM_CHAT_ID=@my_channel
+```
+
 ### 4. 启动服务
 
 ```bash
@@ -78,7 +104,7 @@ docker compose up -d
 
 ```bash
 curl http://localhost:8000/health
-# {"status": "ok", "immich_enabled": true}
+# {"status": "ok", "immich_enabled": true, "telegram_enabled": false}
 ```
 
 ## 📡 API 接口
@@ -218,6 +244,16 @@ immich:
     - .mp4
     - .jpg
     # ... 更多格式见 config.example.yml
+
+# ── Telegram 集成 ──────────────
+telegram:
+  enabled: false                 # 是否启用 Telegram 推送
+  bot_token: ''                  # Bot Token（留空则读环境变量 TELEGRAM_BOT_TOKEN）
+  chat_id: ''                   # Channel/Group ID（留空则读环境变量 TELEGRAM_CHAT_ID）
+  api_base: 'https://api.telegram.org'  # 可自定义 API 地址（用于代理）
+  caption_template: '{desc}'     # 消息标题模板，支持 {desc} {author} {date} {tags}
+  send_cover: true               # 是否同时发送封面图
+  upload_timeout: 600            # 单文件上传超时（秒）
 ```
 
 ### 环境变量
@@ -227,6 +263,8 @@ immich:
 | `DY_CONFIG_PATH` | 配置文件路径 | `config.yml` |
 | `IMMICH_API_URL` | Immich API 地址（config.yml 优先） | — |
 | `IMMICH_API_KEY` | Immich API Key（config.yml 优先） | — |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot Token（config.yml 优先） | — |
+| `TELEGRAM_CHAT_ID` | Telegram Channel/Group ID（config.yml 优先） | — |
 
 ### `docker-compose.yml` 说明
 
@@ -270,3 +308,4 @@ uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 
 - 核心下载器基于 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) V2.0
 - 照片管理使用 [Immich](https://immich.app/) 自托管方案
+- Telegram Bot API 文档: [core.telegram.org/bots/api](https://core.telegram.org/bots/api)

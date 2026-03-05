@@ -16,6 +16,9 @@ services:
       # Immich 配置已移至 config.yml，以下环境变量作为备用/覆盖
       - IMMICH_API_URL=http://host.docker.internal:2283
       - IMMICH_API_KEY=${IMMICH_API_KEY}
+      # Telegram 配置已移至 config.yml，以下环境变量作为备用/覆盖
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
       # 如需 transcript 功能，取消下行注释
       # - OPENAI_API_KEY=sk-xxxx
     extra_hosts:
