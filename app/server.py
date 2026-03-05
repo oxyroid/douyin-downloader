@@ -74,6 +74,22 @@ def _read_new_manifest_entries(manifest_path: Path, skip_lines: int) -> list[dic
     return entries
 
 
+async def _resolve_short_url(url: str) -> str:
+    """将抖音短链解析为完整 URL（跟踪重定向），非短链原样返回"""
+    if "v.douyin.com" not in url:
+        return url
+    try:
+        import aiohttp
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                resolved = str(resp.url)
+                logger.info("短链解析: %s -> %s", url, resolved)
+                return resolved
+    except Exception as e:
+        logger.warning("短链解析失败: %s -> %s", url, e)
+        return url
+
+
 def _find_manifest_entries_by_url(manifest_path: Path, url: str) -> list[dict]:
     """从完整 manifest 中查找与给定 URL 匹配的条目（按 aweme_id 或 url 字段匹配）"""
     if not manifest_path.exists():
@@ -274,12 +290,14 @@ async def _run_download(task_id: str, req: DownloadRequest):
             tg = get_telegram_uploader(config.get("telegram", {}))
             if tg:
                 try:
-                    # 优先使用本次新下载的文件；若无则按 URL 匹配已有记录
-                    tg_entries = new_entries if new_entries else _find_manifest_entries_by_url(manifest_path, req.url)
+                    # 优先使用本次新下载的文件；若无则解析短链后按 URL 匹配已有记录
+                    tg_entries = new_entries
                     tg_files: list[Path] = []
                     if new_entries:
                         tg_files = list(new_files)
                     else:
+                        resolved_url = await _resolve_short_url(req.url)
+                        tg_entries = _find_manifest_entries_by_url(manifest_path, resolved_url)
                         for entry in tg_entries:
                             for rel_path in entry.get("file_paths", []):
                                 full_path = download_dir / rel_path

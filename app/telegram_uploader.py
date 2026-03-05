@@ -150,6 +150,12 @@ class TelegramUploader:
         # _text_ → <i>text</i>  (注意不匹配已经是 HTML 标签里的下划线)
         caption = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', caption)
 
+        # 在末尾追加原抖音视频链接
+        aweme_id = entry.get("aweme_id", "")
+        if aweme_id:
+            link = f"https://www.douyin.com/video/{aweme_id}"
+            caption += f' <a href="{link}">🔗</a>'
+
         # Telegram caption 限制 1024 字符
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
@@ -162,17 +168,21 @@ class TelegramUploader:
         """
         将多个媒体文件合并为一条 MediaGroup 消息发送。
         caption 只附加在第一个媒体上。
-        Telegram 限制: 2-10 个媒体项，每个文件 <=50MB。
+        封面图排在前面，视频排在后面。
+        Telegram 限制: 2-10 个媒体项。
         """
         session = await self._get_session()
         url = f"{self._api_url}/sendMediaGroup"
+
+        # 封面（图片）排前面，视频排后面
+        sorted_files = sorted(files, key=lambda f: (f.suffix.lower() in _VIDEO_EXTENSIONS, f.name))
 
         data = aiohttp.FormData()
         data.add_field("chat_id", self.chat_id)
         data.add_field("disable_notification", "true")
 
         media_items = []
-        for i, file_path in enumerate(files):
+        for i, file_path in enumerate(sorted_files):
             attach_key = f"file{i}"
             suffix = file_path.suffix.lower()
 
@@ -225,9 +235,9 @@ class TelegramUploader:
             async with session.post(url, data=data) as resp:
                 body = await resp.json()
                 if body.get("ok"):
-                    names = [f.name for f in files]
-                    logger.info("已发送 MediaGroup 到 Telegram (%d 个文件): %s", len(files), names)
-                    return {"status": "sent", "type": "media_group", "count": len(files)}
+                    names = [f.name for f in sorted_files]
+                    logger.info("已发送 MediaGroup 到 Telegram (%d 个文件): %s", len(sorted_files), names)
+                    return {"status": "sent", "type": "media_group", "count": len(sorted_files)}
                 else:
                     error_desc = body.get("description", "unknown error")
                     logger.error("Telegram MediaGroup 发送失败: %s", error_desc)

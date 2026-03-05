@@ -2,17 +2,22 @@
 
 基于 [douyin-downloader V2.0](./app/README.md) 封装的 **Docker 化 HTTP 服务**，提供 RESTful API 接口用于下载抖音视频/图文，支持自动上传到 [Immich](https://immich.app/) 自建相册和 [Telegram](https://telegram.org/) Channel，并可通过 iOS 快捷指令一键触发。
 
-## ✨ 功能特性
+## 功能特性
 
-- 🐳 **Docker 一键部署** — `docker compose up -d` 即可运行
-- 🌐 **HTTP API** — FastAPI 提供 REST 接口，支持异步/同步下载
-- 📱 **iOS 快捷指令** — GET 接口 + `sync=1` 参数，分享链接即可触发下载并收到通知
-- 📤 **Immich 自动上传** — 下载完成后自动上传到 Immich，按作者分相册（`douyin-作者名`）
-- 📲 **Telegram 自动推送** — 下载完成后自动发送到 Telegram Channel/Group，附带标题和标签
-- 🔄 **三层去重** — API 层（URL 去重）→ 下载器层（SQLite + 本地文件）→ Immich 层（checksum）
-- 🔧 **全部可配置** — 所有参数均可通过 `config.yml` 或环境变量配置
+- **Docker 一键部署** — `docker compose up -d` 即可运行
+- **HTTP API** — FastAPI 提供 REST 接口，支持异步/同步下载
+- **iOS 快捷指令** — GET 接口 + `sync=1` 参数，分享链接即可触发下载并收到通知
+- **Immich 自动上传** — 下载完成后自动上传到 Immich，按作者分相册（`douyin-作者名`）
+- **Telegram 自动推送** — 下载完成后自动发送到 Telegram Channel/Group
+  - 同一作品的封面+视频合并为 MediaGroup（封面在前，视频在后）
+  - 自动附带标题、标签和原视频链接
+  - 视频自动携带宽高和缩略图，正确显示比例
+  - 静音发送，不打扰频道订阅者
+  - 支持自建 Bot API Server（local 模式），上传文件最大 2GB
+- **三层去重** — API 层（URL 去重）→ 下载器层（SQLite + 本地文件）→ Immich 层（checksum）
+- **全部可配置** — 所有参数均可通过 `config.yml` 或环境变量配置
 
-## 📁 项目结构
+## 项目结构
 
 ```
 ├── app/                        # 应用代码
@@ -21,13 +26,16 @@
 │   ├── telegram_uploader.py    # Telegram 推送模块
 │   ├── config.example.yml      # 配置模板
 │   └── ...                     # 下载器核心模块
+├── telegram-bot-api/           # 自建 Telegram Bot API Server
+│   ├── Dockerfile              # 基于 aiogram/telegram-bot-api + proxychains
+│   └── entrypoint.sh           # 启动脚本（代理配置 + DNS 解析）
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .env.example                # 环境变量模板
 └── .gitignore
 ```
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1. 准备配置
 
@@ -83,7 +91,8 @@ telegram:
   enabled: true
   bot_token: '123456:ABC-DEF...'     # Bot Token
   chat_id: '@my_channel'             # Channel 用户名或 chat_id (如 -100xxxx)
-  caption_template: '{desc}'         # 消息标题模板
+  api_base: 'http://telegram-bot-api:8081'  # 使用自建 Bot API Server
+  caption_template: '**{author}:** {desc} {tags}'  # 支持 Markdown 风格加粗/斜体
   send_cover: true                   # 是否同时发送封面图
 ```
 
@@ -93,6 +102,22 @@ telegram:
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
 TELEGRAM_CHAT_ID=@my_channel
 ```
+
+**自建 Bot API Server（推荐）**
+
+项目内置了 `telegram-bot-api` 容器，基于 `aiogram/telegram-bot-api` + `proxychains-ng` 构建，支持：
+
+- **local 模式**：上传文件最大 2GB（官方 API 限制 50MB）
+- **代理支持**：通过宿主机 SOCKS5 代理（默认 `host.docker.internal:7890`）访问 Telegram DC
+
+使用前需在 `.env` 中配置 Telegram API 凭据（从 [my.telegram.org](https://my.telegram.org) 获取）：
+
+```bash
+TELEGRAM_API_ID=your_api_id
+TELEGRAM_API_HASH=your_api_hash
+```
+
+如果不需要自建 Bot API Server，可以将 `api_base` 改为 `https://api.telegram.org` 并移除 `docker-compose.yml` 中的 `telegram-bot-api` 服务。
 
 ### 4. 启动服务
 
@@ -107,7 +132,7 @@ curl http://localhost:8000/health
 # {"status": "ok", "immich_enabled": true, "telegram_enabled": false}
 ```
 
-## 📡 API 接口
+## API 接口
 
 所有下载接口返回统一的响应格式，包含 `summary` 字段便于展示。
 
@@ -135,8 +160,8 @@ curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx&sync=1"
     "task_id": "a1b2c3d4e5f6",
     "status": "completed",
     "url": "https://v.douyin.com/xxxxxxxx",
-    "message": "成功 1 / 失败 0 / 跳过 0 | Immich: 上传 2, 重复 0, 失败 0",
-    "summary": "1个下载成功\n2个已上传Immich"
+    "message": "成功 1 / 失败 0 / 跳过 0 | Immich: 上传 2, 重复 0, 失败 0 | Telegram: 发送 2, 跳过 0, 失败 0",
+    "summary": "1个下载成功\n2个已上传Immich\n2个已发送Telegram"
 }
 ```
 
@@ -198,7 +223,7 @@ curl http://localhost:8000/reset
 }
 ```
 
-## 📱 iOS 快捷指令配置
+## iOS 快捷指令配置
 
 创建快捷指令，在抖音分享页面一键下载并上传到 Immich：
 
@@ -212,11 +237,11 @@ curl http://localhost:8000/reset
    - 标题：抖音下载
    - 内容：上一步的 `summary` 值
 
-> 💡 通过 Cloudflare Tunnel 等方式暴露服务后，可在外网使用。
+> 通过 Cloudflare Tunnel 等方式暴露服务后，可在外网使用。
 >
-> 💡 如果在 Immich 中删除了文件后需要重新上传，先调用 `/reset` 清理下载记录，再重新分享链接即可。
+> 如果在 Immich 中删除了文件后需要重新上传，先调用 `/reset` 清理下载记录，再重新分享链接即可。
 
-## ⚙️ 配置说明
+## 配置说明
 
 ### `config.yml` 主要配置项
 
@@ -250,8 +275,8 @@ telegram:
   enabled: false                 # 是否启用 Telegram 推送
   bot_token: ''                  # Bot Token（留空则读环境变量 TELEGRAM_BOT_TOKEN）
   chat_id: ''                   # Channel/Group ID（留空则读环境变量 TELEGRAM_CHAT_ID）
-  api_base: 'https://api.telegram.org'  # 可自定义 API 地址（用于代理）
-  caption_template: '{desc}'     # 消息标题模板，支持 {desc} {author} {date} {tags}
+  api_base: 'http://telegram-bot-api:8081'  # 自建 Bot API Server（或 https://api.telegram.org）
+  caption_template: '**{author}:** {desc} {tags}'  # 支持 **加粗** 和 _斜体_，自动转 HTML
   send_cover: true               # 是否同时发送封面图
   upload_timeout: 600            # 单文件上传超时（秒）
 ```
@@ -265,6 +290,8 @@ telegram:
 | `IMMICH_API_KEY` | Immich API Key（config.yml 优先） | — |
 | `TELEGRAM_BOT_TOKEN` | Telegram Bot Token（config.yml 优先） | — |
 | `TELEGRAM_CHAT_ID` | Telegram Channel/Group ID（config.yml 优先） | — |
+| `TELEGRAM_API_ID` | 自建 Bot API Server 所需，从 my.telegram.org 获取 | — |
+| `TELEGRAM_API_HASH` | 自建 Bot API Server 所需，从 my.telegram.org 获取 | — |
 
 ### `docker-compose.yml` 说明
 
@@ -280,7 +307,7 @@ volumes:
 docker compose restart
 ```
 
-## 🔄 去重机制
+## 去重机制
 
 三层去重确保不会重复下载和上传：
 
@@ -290,7 +317,7 @@ docker compose restart
 | **下载器层** | SQLite + 本地文件检测 | aweme_id 级别 | 持久化（可通过 `/reset` 清除） |
 | **Immich 层** | 文件 checksum 校验 + 垃圾箱恢复 | 文件内容级别 | 持久化（Immich 数据库） |
 
-## 🔨 本地开发
+## 本地开发
 
 ```bash
 cd app
@@ -304,7 +331,7 @@ python server.py
 uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-## 📝 致谢
+## 致谢
 
 - 核心下载器基于 [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader) V2.0
 - 照片管理使用 [Immich](https://immich.app/) 自托管方案
