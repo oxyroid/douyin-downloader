@@ -154,6 +154,34 @@ def _register_task(url: str, task_id: str):
     _url_to_task[_normalize_url(url)] = task_id
 
 
+async def _create_or_get_task(url: str) -> tuple[str, bool]:
+    """
+    创建新任务或返回现有任务
+    返回: (task_id, is_existing)
+    """
+    existing = _find_existing_task(url)
+    if existing:
+        return existing, True
+
+    task_id = uuid.uuid4().hex[:12]
+    _tasks[task_id] = {
+        "status": "pending",
+        "total": 0,
+        "success": 0,
+        "failed": 0,
+        "skipped": 0,
+        "message": ""
+    }
+    _register_task(url, task_id)
+    return task_id, False
+
+
+def _get_task_response(task_id: str) -> DownloadResponse:
+    """从任务 ID 生成 DownloadResponse"""
+    info = _tasks[task_id]
+    return DownloadResponse(task_id=task_id, **info)
+
+
 async def _run_download(task_id: str, req: DownloadRequest):
     """后台执行下载任务"""
     try:
@@ -254,38 +282,26 @@ async def _run_download(task_id: str, req: DownloadRequest):
 
 # ── API 路由 ──────────────────────────────────────────────
 @app.post("/download", response_model=DownloadResponse)
-async def start_download(req: DownloadRequest):
-    """提交下载任务（异步执行，立即返回 task_id）"""
-    existing = _find_existing_task(req.url)
-    if existing:
-        info = _tasks[existing]
-        return DownloadResponse(task_id=existing, **info)
+async def download(
+    req: DownloadRequest,
+    sync: bool = Query(False, description="是否同步等待完成 (true=等待完成, false=立即返回)")
+):
+    """
+    统一下载接口
+    - sync=false (默认): 异步执行，立即返回 task_id
+    - sync=true: 同步执行，等待完成后返回结果
+    """
+    task_id, is_existing = await _create_or_get_task(req.url)
 
-    task_id = uuid.uuid4().hex[:12]
-    _tasks[task_id] = {"status": "pending", "total": 0, "success": 0, "failed": 0, "skipped": 0, "message": ""}
-    _register_task(req.url, task_id)
+    if is_existing:
+        return _get_task_response(task_id)
 
-    asyncio.create_task(_run_download(task_id, req))
-
-    return DownloadResponse(task_id=task_id, status="pending", message="任务已提交")
-
-
-@app.post("/download/sync", response_model=DownloadResponse)
-async def sync_download(req: DownloadRequest):
-    """同步下载（等待下载完成后再返回结果）"""
-    existing = _find_existing_task(req.url)
-    if existing:
-        info = _tasks[existing]
-        return DownloadResponse(task_id=existing, **info)
-
-    task_id = uuid.uuid4().hex[:12]
-    _tasks[task_id] = {"status": "pending", "total": 0, "success": 0, "failed": 0, "skipped": 0, "message": ""}
-    _register_task(req.url, task_id)
-
-    await _run_download(task_id, req)
-
-    info = _tasks[task_id]
-    return DownloadResponse(task_id=task_id, **info)
+    if sync:
+        await _run_download(task_id, req)
+        return _get_task_response(task_id)
+    else:
+        asyncio.create_task(_run_download(task_id, req))
+        return DownloadResponse(task_id=task_id, status="pending", message="任务已提交")
 
 
 @app.get("/task/{task_id}", response_model=DownloadResponse)
@@ -304,36 +320,40 @@ async def quick_download(
     sync: bool = Query(False, description="是否同步等待下载完成"),
 ):
     """
-    GET 快捷下载接口。
+    GET 快捷下载接口，专为 iOS 快捷指令设计。
     - sync=0（默认）: 立即返回，后台异步执行
-    - sync=1: 等待下载+上传完成后返回结果（适合 iOS 快捷指令）
+    - sync=1: 等待下载+上传完成后返回结果
 
     用法: /d?url=<encoded_url>&sync=1
     """
     decoded_url = unquote(url)
-
-    existing = _find_existing_task(decoded_url)
-    if existing:
-        info = _tasks[existing]
-        return {"task_id": existing, "status": info["status"], "url": decoded_url,
-                "message": info.get("message") or "该链接已提交过",
-                "summary": _build_summary(info)}
-
-    task_id = uuid.uuid4().hex[:12]
-    _tasks[task_id] = {"status": "pending", "total": 0, "success": 0, "failed": 0, "skipped": 0, "message": ""}
-    _register_task(decoded_url, task_id)
-
     req = DownloadRequest(url=decoded_url)
+
+    task_id, is_existing = await _create_or_get_task(decoded_url)
+
+    if is_existing:
+        info = _tasks[task_id]
+        return {
+            "task_id": task_id,
+            "status": info["status"],
+            "url": decoded_url,
+            "message": info.get("message") or "该链接已提交过",
+            "summary": _build_summary(info)
+        }
 
     if sync:
         await _run_download(task_id, req)
-        info = _tasks[task_id]
-        return {"task_id": task_id, "status": info["status"], "url": decoded_url,
-                "message": info.get("message", ""),
-                "summary": _build_summary(info)}
     else:
         asyncio.create_task(_run_download(task_id, req))
-        return {"task_id": task_id, "status": "pending", "url": decoded_url, "message": "任务已提交"}
+
+    info = _tasks[task_id]
+    return {
+        "task_id": task_id,
+        "status": info["status"],
+        "url": decoded_url,
+        "message": info.get("message", "任务已提交" if not sync else ""),
+        "summary": _build_summary(info)
+    }
 
 
 def _build_summary(info: dict) -> str:
