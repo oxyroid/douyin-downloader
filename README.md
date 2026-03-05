@@ -83,6 +83,8 @@ curl http://localhost:8000/health
 
 ## 📡 API 接口
 
+所有下载接口返回统一的响应格式，包含 `summary` 字段便于展示。
+
 ### GET `/d` — 快捷下载（推荐）
 
 最简单的下载接口，适合 iOS 快捷指令或浏览器直接调用。
@@ -100,7 +102,7 @@ curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx"
 curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx&sync=1"
 ```
 
-**同步响应示例：**
+**响应示例：**
 
 ```json
 {
@@ -112,12 +114,20 @@ curl "http://localhost:8000/d?url=https%3A%2F%2Fv.douyin.com%2Fxxxxxxxx&sync=1"
 }
 ```
 
-### POST `/download` — 异步下载
+### POST `/download` — JSON 下载
+
+支持更多参数的下载接口，通过 `sync` 字段控制同步/异步。
 
 ```bash
+# 异步下载
 curl -X POST http://localhost:8000/download \
   -H "Content-Type: application/json" \
   -d '{"url": "https://v.douyin.com/xxxxxxxx"}'
+
+# 同步下载
+curl -X POST http://localhost:8000/download \
+  -H "Content-Type: application/json" \
+  -d '{"url": "https://v.douyin.com/xxxxxxxx", "sync": true}'
 ```
 
 **请求体参数：**
@@ -125,13 +135,10 @@ curl -X POST http://localhost:8000/download \
 | 参数 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | `url` | string | ✅ | 抖音链接 |
+| `sync` | bool | ❌ | 是否同步等待完成（默认 `false`） |
 | `mode` | string[] | ❌ | 下载模式，如 `["post"]` |
 | `number_post` | int | ❌ | 下载数量限制，`0` = 全部 |
 | `thread` | int | ❌ | 并发数 |
-
-### POST `/download/sync` — 同步下载
-
-参数同上，等待下载完成后返回结果。
 
 ### GET `/task/{task_id}` — 查询任务状态
 
