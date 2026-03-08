@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-轻量 HTTP 服务，接收 URL 请求后调用 douyin-downloader CLI 核心逻辑执行下载。
+Lightweight HTTP service that receives URL requests and invokes the
+douyin-downloader CLI core to perform downloads.
 """
 
 import asyncio
@@ -18,13 +19,13 @@ from pydantic import BaseModel, Field
 
 
 class UTF8JSONResponse(JSONResponse):
-    """确保中文直接输出而非 \\uxxxx 转义"""
+    """JSON response that outputs CJK characters directly instead of \\uxxxx escapes."""
     media_type = "application/json; charset=utf-8"
 
     def render(self, content) -> bytes:
         return json.dumps(content, ensure_ascii=False).encode("utf-8")
 
-# 确保项目根目录在 sys.path 中
+# Ensure the project root is on sys.path
 project_root = Path(__file__).parent
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
@@ -46,7 +47,7 @@ set_console_log_level(logging.INFO)
 
 
 def _count_manifest_lines(manifest_path: Path) -> int:
-    """统计 manifest 文件当前行数"""
+    """Return the current line count of the manifest file."""
     if not manifest_path.exists():
         return 0
     try:
@@ -57,7 +58,7 @@ def _count_manifest_lines(manifest_path: Path) -> int:
 
 
 def _read_new_manifest_entries(manifest_path: Path, skip_lines: int) -> list[dict]:
-    """读取 manifest 文件中从 skip_lines 之后新增的行"""
+    """Read manifest entries appended after *skip_lines*."""
     if not manifest_path.exists():
         return []
     entries = []
@@ -70,12 +71,12 @@ def _read_new_manifest_entries(manifest_path: Path, skip_lines: int) -> list[dic
                 if line:
                     entries.append(json.loads(line))
     except Exception as e:
-        logger.warning("读取 manifest 新增条目失败: %s", e)
+        logger.warning("Failed to read new manifest entries: %s", e)
     return entries
 
 
 async def _resolve_short_url(url: str) -> str:
-    """将抖音短链解析为完整 URL（跟踪重定向），非短链原样返回"""
+    """Follow redirects for Douyin short links; return the original URL otherwise."""
     if "v.douyin.com" not in url:
         return url
     try:
@@ -83,15 +84,15 @@ async def _resolve_short_url(url: str) -> str:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 resolved = str(resp.url)
-                logger.info("短链解析: %s -> %s", url, resolved)
+                logger.info("Short URL resolved: %s -> %s", url, resolved)
                 return resolved
     except Exception as e:
-        logger.warning("短链解析失败: %s -> %s", url, e)
+        logger.warning("Short URL resolution failed: %s -> %s", url, e)
         return url
 
 
 def _find_manifest_entries_by_url(manifest_path: Path, url: str) -> list[dict]:
-    """从完整 manifest 中查找与给定 URL 匹配的条目（按 aweme_id 或 url 字段匹配）"""
+    """Find manifest entries matching a URL (by aweme_id or exact url field)."""
     if not manifest_path.exists():
         return []
     entries = []
@@ -102,18 +103,17 @@ def _find_manifest_entries_by_url(manifest_path: Path, url: str) -> list[dict]:
                 if not line:
                     continue
                 entry = json.loads(line)
-                # 匹配方式: URL 包含 aweme_id，或 manifest 中记录的 url 与请求 URL 相关
                 entry_url = entry.get("url", "")
                 aweme_id = entry.get("aweme_id", "")
                 if (aweme_id and aweme_id in url) or (entry_url and entry_url == url):
                     entries.append(entry)
     except Exception as e:
-        logger.warning("查找 manifest 条目失败: %s", e)
+        logger.warning("Manifest lookup failed: %s", e)
     return entries
 
 app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse)
 
-# ── 全局单例 ──────────────────────────────────────────────
+# -- Singletons --------------------------------------------------------
 _config: Optional[ConfigLoader] = None
 _cookie_manager: Optional[CookieManager] = None
 _database: Optional[Database] = None
@@ -147,13 +147,13 @@ async def _get_database() -> Optional[Database]:
     return _database
 
 
-# ── 请求/响应模型 ─────────────────────────────────────────
+# -- Request / Response models -----------------------------------------
 class DownloadRequest(BaseModel):
-    url: str = Field(..., description="抖音链接（视频/图文/用户主页/短链均可）")
-    mode: Optional[list[str]] = Field(None, description="下载模式，如 ['post']")
-    number_post: Optional[int] = Field(None, description="post 下载数量限制，0=全部")
-    thread: Optional[int] = Field(None, description="并发数")
-    sync: bool = Field(False, description="是否同步等待下载完成")
+    url: str = Field(..., description="Douyin link (video/gallery/user profile/short link)")
+    mode: Optional[list[str]] = Field(None, description="Download mode, e.g. ['post']")
+    number_post: Optional[int] = Field(None, description="Max posts to download, 0 = all")
+    thread: Optional[int] = Field(None, description="Concurrency")
+    sync: bool = Field(False, description="Wait for download to finish before responding")
 
 
 class DownloadResponse(BaseModel):
@@ -168,49 +168,47 @@ class DownloadResponse(BaseModel):
     summary: str = ""
 
 
-# ── 正在运行的任务追踪 ───────────────────────────────────
+# -- In-flight task tracking -------------------------------------------
 _tasks: dict[str, dict] = {}
-# URL → task_id 映射，防止同一 URL 重复下载
+# URL -> task_id mapping to prevent duplicate downloads
 _url_to_task: dict[str, str] = {}
 
 
 def _normalize_url(url: str) -> str:
-    """归一化 URL，去掉尾部斜杠和空白"""
+    """Strip trailing slashes and whitespace."""
     return url.strip().rstrip("/")
 
 
 def _find_existing_task(url: str) -> Optional[str]:
-    """如果该 URL 已有未失败的任务，返回其 task_id"""
+    """Return the task_id if a non-failed task already exists for this URL."""
     normalized = _normalize_url(url)
     task_id = _url_to_task.get(normalized)
     if task_id and task_id in _tasks:
         status = _tasks[task_id].get("status")
-        # pending / running / completed 都视为有效，不再重复提交
         if status in ("pending", "running", "completed"):
             return task_id
     return None
 
 
 def _register_task(url: str, task_id: str):
-    """注册 URL → task_id 映射"""
+    """Register a URL -> task_id mapping."""
     _url_to_task[_normalize_url(url)] = task_id
 
 
 async def _run_download(task_id: str, req: DownloadRequest):
-    """后台执行下载任务"""
+    """Execute a download task (runs in background or inline)."""
     try:
         _tasks[task_id]["status"] = "running"
 
         config = await _get_config()
 
-        # 按请求覆盖配置（不影响全局 _config，使用深拷贝）
+        # Deep-copy config so per-request overrides don't leak globally
         from copy import deepcopy
 
         task_config = ConfigLoader.__new__(ConfigLoader)
         task_config.config_path = config.config_path
         task_config.config = deepcopy(config.config)
 
-        # 设置本次请求的 URL
         task_config.update(link=[req.url])
 
         if req.mode:
@@ -225,7 +223,7 @@ async def _run_download(task_id: str, req: DownloadRequest):
         cookie_manager = await _get_cookie_manager()
         database = await _get_database()
 
-        # 记录下载前 manifest 行数，用于识别本次下载新增的文件
+        # Record manifest line count before download so we can find new entries
         download_dir = Path(config.get("path", "./Downloaded/"))
         manifest_path = download_dir / "download_manifest.jsonl"
         manifest_lines_before = _count_manifest_lines(manifest_path)
@@ -245,10 +243,10 @@ async def _run_download(task_id: str, req: DownloadRequest):
                 success=result.success,
                 failed=result.failed,
                 skipped=result.skipped,
-                message=f"成功 {result.success} / 失败 {result.failed} / 跳过 {result.skipped}",
+                message=f"ok {result.success} / fail {result.failed} / skip {result.skipped}",
             )
 
-            # ── 收集本次下载产生的新文件 ──
+            # -- Collect files produced by this download --
             new_entries = _read_new_manifest_entries(manifest_path, manifest_lines_before)
             new_files: list[Path] = []
             for entry in new_entries:
@@ -257,7 +255,7 @@ async def _run_download(task_id: str, req: DownloadRequest):
                     if full_path.exists():
                         new_files.append(full_path)
 
-            # ── Immich 上传 ──
+            # -- Immich upload --
             immich = get_immich_uploader(config.get("immich", {}))
             if immich:
                 try:
@@ -268,29 +266,29 @@ async def _run_download(task_id: str, req: DownloadRequest):
                         restored = immich_stats.get("restored", 0)
                         uploaded = immich_stats.get("uploaded", 0)
                         immich_msg = (
-                            f" | Immich: 上传 {uploaded}"
-                            f", 恢复 {restored}"
-                            f", 重复 {immich_stats.get('duplicates', 0)}"
-                            f", 失败 {immich_stats.get('failed', 0)}"
+                            f" | Immich: uploaded {uploaded}"
+                            f", restored {restored}"
+                            f", dup {immich_stats.get('duplicates', 0)}"
+                            f", failed {immich_stats.get('failed', 0)}"
                         )
                         _tasks[task_id]["message"] += immich_msg
                         _tasks[task_id]["immich"] = immich_stats
-                        logger.info("Immich 上传完成: %s", immich_stats)
+                        logger.info("Immich upload done: %s", immich_stats)
                     else:
-                        logger.info("本次下载无新文件需要上传到 Immich")
+                        logger.info("No new files to upload to Immich")
                         _tasks[task_id]["immich"] = {
                             "uploaded": 0, "restored": 0, "duplicates": 0, "failed": 0,
                         }
                 except Exception as e:
-                    logger.exception("Immich 上传失败")
-                    _tasks[task_id]["message"] += f" | Immich 上传失败: {e}"
+                    logger.exception("Immich upload failed")
+                    _tasks[task_id]["message"] += f" | Immich upload failed: {e}"
 
-            # ── Telegram 上传 ──
-            # 不管是否有新下载，都扫描 manifest 中所有匹配的文件发送到 Telegram
+            # -- Telegram upload --
+            # Always scan manifest for matching files, even if nothing new was downloaded
             tg = get_telegram_uploader(config.get("telegram", {}))
             if tg:
                 try:
-                    # 优先使用本次新下载的文件；若无则解析短链后按 URL 匹配已有记录
+                    # Prefer newly downloaded files; otherwise resolve short URL and match
                     tg_entries = new_entries
                     tg_files: list[Path] = []
                     if new_entries:
@@ -310,32 +308,32 @@ async def _run_download(task_id: str, req: DownloadRequest):
                             manifest_entries=tg_entries,
                         )
                         tg_msg = (
-                            f" | Telegram: 发送 {tg_stats.get('sent', 0)}"
-                            f", 跳过 {tg_stats.get('skipped', 0)}"
-                            f", 失败 {tg_stats.get('failed', 0)}"
+                            f" | Telegram: sent {tg_stats.get('sent', 0)}"
+                            f", skip {tg_stats.get('skipped', 0)}"
+                            f", fail {tg_stats.get('failed', 0)}"
                         )
                         _tasks[task_id]["message"] += tg_msg
                         _tasks[task_id]["telegram"] = tg_stats
-                        logger.info("Telegram 发送完成: %s", tg_stats)
+                        logger.info("Telegram send done: %s", tg_stats)
                     else:
-                        logger.info("manifest 中无可发送文件")
+                        logger.info("No matching files in manifest for Telegram")
                         _tasks[task_id]["telegram"] = {
                             "sent": 0, "skipped": 0, "failed": 0,
                         }
                 except Exception as e:
-                    logger.exception("Telegram 发送失败")
-                    _tasks[task_id]["message"] += f" | Telegram 发送失败: {e}"
+                    logger.exception("Telegram send failed")
+                    _tasks[task_id]["message"] += f" | Telegram send failed: {e}"
         else:
-            _tasks[task_id].update(status="failed", message="下载失败或链接无效")
+            _tasks[task_id].update(status="failed", message="Download failed or invalid link")
 
     except Exception as e:
         logger.exception("Download task %s failed", task_id)
         _tasks[task_id].update(status="failed", message=str(e))
 
 
-# ── 公共任务管理 ──────────────────────────────────────────
+# -- Task helpers ------------------------------------------------------
 def _task_to_response(task_id: str, url: str = "") -> DownloadResponse:
-    """将内部 task dict 转换为统一的 DownloadResponse"""
+    """Convert internal task dict to a DownloadResponse."""
     info = _tasks.get(task_id, {})
     return DownloadResponse(
         task_id=task_id,
@@ -351,13 +349,11 @@ def _task_to_response(task_id: str, url: str = "") -> DownloadResponse:
 
 
 async def _submit_task(url: str, req: DownloadRequest) -> DownloadResponse:
-    """统一的任务提交入口：去重检查 → 创建任务 → 同步/异步执行"""
-    # 1. 去重：如果该 URL 已有有效任务，直接返回
+    """Shared task submission: dedup check -> create task -> sync/async exec."""
     existing = _find_existing_task(url)
     if existing:
         return _task_to_response(existing, url)
 
-    # 2. 创建新任务
     task_id = uuid.uuid4().hex[:12]
     _tasks[task_id] = {
         "status": "pending", "total": 0, "success": 0,
@@ -365,7 +361,6 @@ async def _submit_task(url: str, req: DownloadRequest) -> DownloadResponse:
     }
     _register_task(url, task_id)
 
-    # 3. 同步 or 异步执行
     if req.sync:
         await _run_download(task_id, req)
     else:
@@ -374,27 +369,25 @@ async def _submit_task(url: str, req: DownloadRequest) -> DownloadResponse:
     return _task_to_response(task_id, url)
 
 
-# ── API 路由 ──────────────────────────────────────────────
+# -- API routes --------------------------------------------------------
 @app.post("/download", response_model=DownloadResponse)
 async def download(req: DownloadRequest):
-    """
-    下载接口（POST JSON）。
+    """Download endpoint (POST JSON).
 
-    - sync=false（默认）: 异步执行，立即返回 task_id
-    - sync=true: 同步等待下载+上传完成后返回结果
+    sync=false (default): run in background, return task_id immediately.
+    sync=true: block until download + upload finishes, then return result.
     """
     return await _submit_task(req.url, req)
 
 
 @app.get("/d", response_model=DownloadResponse)
 async def quick_download(
-    url: str = Query(..., description="抖音链接（需 URL 编码）"),
-    sync: bool = Query(False, description="是否同步等待下载完成"),
+    url: str = Query(..., description="Douyin link (URL-encoded)"),
+    sync: bool = Query(False, description="Wait for completion"),
 ):
-    """
-    GET 快捷下载接口，适合浏览器或 iOS 快捷指令直接调用。
+    """GET shortcut for downloading. Handy for browsers and iOS Shortcuts.
 
-    用法: /d?url=<encoded_url>&sync=1
+    Usage: /d?url=<encoded_url>&sync=1
     """
     decoded_url = unquote(url)
     req = DownloadRequest(url=decoded_url, sync=sync)
@@ -403,24 +396,24 @@ async def quick_download(
 
 @app.get("/task/{task_id}", response_model=DownloadResponse)
 async def get_task_status(task_id: str):
-    """查询异步任务状态"""
+    """Query the status of an async task."""
     if task_id not in _tasks:
         raise HTTPException(status_code=404, detail="Task not found")
     return _task_to_response(task_id)
 
 
 def _build_summary(info: dict) -> str:
-    """为 iOS 快捷指令生成一行精简摘要"""
+    """Build a short summary string (used by iOS Shortcuts notifications)."""
     status = info.get("status", "unknown")
     if status == "completed":
         parts = []
         s, f, sk = info.get("success", 0), info.get("failed", 0), info.get("skipped", 0)
         if s:
-            parts.append(f"{s}个下载成功")
+            parts.append(f"{s} downloaded")
         if sk:
-            parts.append(f"{sk}个已下载过，跳过")
+            parts.append(f"{sk} already existed, skipped")
         if f:
-            parts.append(f"{f}个失败")
+            parts.append(f"{f} failed")
         immich = info.get("immich", {})
         if immich:
             uploaded = immich.get("uploaded", 0)
@@ -428,32 +421,31 @@ def _build_summary(info: dict) -> str:
             duplicates = immich.get("duplicates", 0)
             im_failed = immich.get("failed", 0)
             if uploaded:
-                parts.append(f"{uploaded}个已上传Immich")
+                parts.append(f"{uploaded} uploaded to Immich")
             if restored:
-                parts.append(f"{restored}个已从Immich垃圾箱恢复")
+                parts.append(f"{restored} restored from Immich trash")
             if duplicates:
-                parts.append(f"Immich中已有{duplicates}个")
+                parts.append(f"{duplicates} already in Immich")
             if im_failed:
-                parts.append(f"Immich上传失败{im_failed}个")
+                parts.append(f"{im_failed} Immich upload failed")
         tg = info.get("telegram", {})
         if tg:
             tg_sent = tg.get("sent", 0)
             tg_failed = tg.get("failed", 0)
             if tg_sent:
-                parts.append(f"{tg_sent}个已发送Telegram")
+                parts.append(f"{tg_sent} sent to Telegram")
             if tg_failed:
-                parts.append(f"Telegram发送失败{tg_failed}个")
-        return "\n".join(parts) if parts else "完成"
+                parts.append(f"{tg_failed} Telegram send failed")
+        return "\n".join(parts) if parts else "Done"
     elif status == "failed":
-        msg = info.get("message", "未知错误")
-        # 截断过长的错误信息
+        msg = info.get("message", "unknown error")
         if len(msg) > 80:
             msg = msg[:77] + "..."
-        return f"失败: {msg}"
+        return f"Failed: {msg}"
     elif status == "running":
-        return "下载中..."
+        return "Downloading..."
     else:
-        return "排队中..."
+        return "Queued..."
 
 
 @app.get("/health")
@@ -470,9 +462,10 @@ async def health_check():
 
 @app.api_route("/reset", methods=["GET", "POST"])
 async def reset_downloads():
-    """
-    清理 downloads 目录、manifest 和数据库下载记录，
-    使下次请求时下载器不会跳过已有文件，能重新下载并上传到 Immich。
+    """Wipe the download directory, manifest, and DB records.
+
+    After this, subsequent requests will re-download everything and
+    re-upload to Immich.
     """
     import shutil
 
@@ -482,7 +475,6 @@ async def reset_downloads():
     removed_files = 0
     removed_dirs = 0
 
-    # 1. 清理下载目录中的所有子目录（按作者名分的文件夹）
     if download_dir.exists():
         for child in list(download_dir.iterdir()):
             try:
@@ -493,9 +485,8 @@ async def reset_downloads():
                     child.unlink()
                     removed_files += 1
             except Exception as e:
-                logger.warning("清理失败: %s → %s", child, e)
+                logger.warning("Cleanup failed: %s -> %s", child, e)
 
-    # 2. 清理数据库下载记录
     database = await _get_database()
     db_cleared = False
     if database:
@@ -503,15 +494,14 @@ async def reset_downloads():
             await database.clear_downloads()
             db_cleared = True
         except Exception as e:
-            logger.warning("清理数据库记录失败: %s", e)
+            logger.warning("Failed to clear DB records: %s", e)
 
-    # 3. 清空内存中的任务缓存
     _tasks.clear()
     _url_to_task.clear()
 
     logger.info(
-        "Reset 完成: 删除 %d 个目录 + %d 个文件, 数据库%s",
-        removed_dirs, removed_files, "已清理" if db_cleared else "未清理",
+        "Reset done: removed %d dir(s) + %d file(s), db %s",
+        removed_dirs, removed_files, "cleared" if db_cleared else "skipped",
     )
 
     result = {
@@ -523,12 +513,12 @@ async def reset_downloads():
 
     parts = []
     if removed_dirs or removed_files:
-        parts.append(f"已清理 {removed_dirs}个目录 + {removed_files}个文件")
+        parts.append(f"Removed {removed_dirs} dir(s) + {removed_files} file(s)")
     else:
-        parts.append("下载目录已为空")
+        parts.append("Download directory already empty")
     if db_cleared:
-        parts.append("数据库记录已清空")
-    parts.append("下次请求将重新下载并上传到Immich")
+        parts.append("DB records cleared")
+    parts.append("Next request will re-download and re-upload to Immich")
     result["summary"] = "\n".join(parts)
 
     return result

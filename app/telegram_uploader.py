@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Telegram 上传模块：将下载完成的媒体文件通过 Telegram Bot API 发送到指定 Channel。
+Telegram upload module.
 
-直接使用 aiohttp 调用 Telegram Bot API（无额外依赖）:
+Sends downloaded media to a Telegram Channel via Bot API (aiohttp, no extra deps):
   POST /bot<token>/sendVideo
   POST /bot<token>/sendPhoto
   POST /bot<token>/sendDocument
   POST /bot<token>/sendMediaGroup
 
-同一个作品（aweme_id）的视频+封面会合并为一条 MediaGroup 消息发送。
-所有消息默认静音发送（disable_notification=true）。
+Files from the same aweme (video + cover) are grouped into a single MediaGroup.
+All messages are sent silently (disable_notification=true).
 """
 
 import json
@@ -26,18 +26,18 @@ from utils.logger import setup_logger
 
 logger = setup_logger("TelegramUploader")
 
-# Telegram Bot API 文件上传限制
-# 官方 API: 50MB, 自建 local 模式: 2GB
+# File-size limits for Telegram Bot API uploads
+# Official API: 50 MB, self-hosted local mode: 2 GB
 _MAX_FILE_SIZE_OFFICIAL = 50 * 1024 * 1024
 _MAX_FILE_SIZE_LOCAL = 2000 * 1024 * 1024
 
-# 按扩展名分类
+# Extension sets
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
 
 
 def _get_video_dimensions(file_path: Path) -> tuple[int, int]:
-    """用 ffprobe 获取视频宽高，失败返回 (0, 0)"""
+    """Return (width, height) via ffprobe, or (0, 0) on failure."""
     try:
         result = subprocess.run(
             [
@@ -58,16 +58,14 @@ def _get_video_dimensions(file_path: Path) -> tuple[int, int]:
 
 
 def _find_thumbnail(video_path: Path) -> Optional[Path]:
-    """在同目录下查找视频对应的封面图作为 thumbnail"""
+    """Look for a cover image in the same directory to use as thumbnail."""
     stem = video_path.stem
     parent = video_path.parent
-    # 常见封面命名: xxx_cover.jpg, xxx_cover.png
     for ext in (".jpg", ".jpeg", ".png", ".webp"):
-        # 精确匹配: 同名_cover
         cover = parent / f"{stem}_cover{ext}"
         if cover.exists():
             return cover
-    # 模糊匹配: 目录下任何 _cover 文件
+    # Fallback: any *_cover.* file in the directory
     for f in parent.iterdir():
         if "_cover." in f.name and f.suffix.lower() in _IMAGE_EXTENSIONS:
             return f
@@ -75,7 +73,7 @@ def _find_thumbnail(video_path: Path) -> Optional[Path]:
 
 
 class TelegramUploader:
-    """将本地媒体文件发送到 Telegram Channel"""
+    """Sends local media files to a Telegram Channel."""
 
     def __init__(
         self,
@@ -89,13 +87,13 @@ class TelegramUploader:
     ):
         """
         Args:
-            bot_token: Telegram Bot Token (从 @BotFather 获取)
-            chat_id: 目标 Channel/Group 的 chat_id (如 "@my_channel" 或 "-100xxxx")
-            api_base: Telegram Bot API 基础 URL (可自定义用于代理)
-            upload_timeout: 上传超时秒数
-            caption_template: 消息标题模板，支持占位符: {desc}, {author}, {date}, {tags}
-            send_cover: 是否同时发送封面图
-            upload_extensions: 允许上传的扩展名列表
+            bot_token: Telegram Bot Token (from @BotFather).
+            chat_id: Target Channel/Group chat_id (e.g. "@my_channel" or "-100xxxx").
+            api_base: Bot API base URL (override for proxies or self-hosted server).
+            upload_timeout: Per-file upload timeout in seconds.
+            caption_template: Message caption template. Placeholders: {desc}, {author}, {date}, {tags}.
+            send_cover: Whether to include cover images alongside videos.
+            upload_extensions: Allowed file extensions for upload.
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
@@ -108,7 +106,7 @@ class TelegramUploader:
         )
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # 判断是否使用自建 Bot API Server (local 模式)
+        # Self-hosted Bot API Server = local mode
         self.is_local = api_base.rstrip("/") != "https://api.telegram.org"
         self.max_file_size = _MAX_FILE_SIZE_LOCAL if self.is_local else _MAX_FILE_SIZE_OFFICIAL
 
@@ -128,8 +126,10 @@ class TelegramUploader:
             await self._session.close()
 
     def _build_caption(self, entry: dict) -> str:
-        """根据 manifest entry 生成消息标题。
-        模板中支持 Markdown 风格的 **加粗** 和 _斜体_，会自动转换为 HTML 标签。
+        """Build a caption from a manifest entry.
+
+        Markdown-style **bold** and _italic_ in the template are converted to HTML tags.
+        A link to the original Douyin video is appended at the end.
         """
         desc = entry.get("desc", "")
         author = entry.get("author_name", "")
@@ -144,19 +144,19 @@ class TelegramUploader:
             tags=tags,
         )
 
-        # 把 Markdown 风格标记转换为 HTML
+        # Markdown → HTML
         # **text** → <b>text</b>
         caption = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', caption)
-        # _text_ → <i>text</i>  (注意不匹配已经是 HTML 标签里的下划线)
+        # _text_ → <i>text</i>  (avoid matching underscores inside HTML tags)
         caption = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', caption)
 
-        # 在末尾追加原抖音视频链接
+        # Append original Douyin video link
         aweme_id = entry.get("aweme_id", "")
         if aweme_id:
             link = f"https://www.douyin.com/video/{aweme_id}"
             caption += f' <a href="{link}">🔗</a>'
 
-        # Telegram caption 限制 1024 字符
+        # Telegram caption limit: 1024 chars
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
 
@@ -165,16 +165,16 @@ class TelegramUploader:
     async def _send_media_group(
         self, files: list[Path], caption: str = ""
     ) -> dict:
-        """
-        将多个媒体文件合并为一条 MediaGroup 消息发送。
-        caption 只附加在第一个媒体上。
-        封面图排在前面，视频排在后面。
-        Telegram 限制: 2-10 个媒体项。
+        """Send multiple files as a single MediaGroup message.
+
+        Caption is attached to the first item only.
+        Cover images are placed before videos.
+        Telegram limit: 2–10 media items per group.
         """
         session = await self._get_session()
         url = f"{self._api_url}/sendMediaGroup"
 
-        # 封面（图片）排前面，视频排后面
+        # Covers (images) first, videos after
         sorted_files = sorted(files, key=lambda f: (f.suffix.lower() in _VIDEO_EXTENSIONS, f.name))
 
         data = aiohttp.FormData()
@@ -196,13 +196,12 @@ class TelegramUploader:
                 "media": f"attach://{attach_key}",
             }
 
-            # 视频: 附带宽高，避免正方形预览
+            # Include width/height for videos to prevent square preview
             if media_type == "video":
                 w, h = _get_video_dimensions(file_path)
                 if w > 0 and h > 0:
                     item["width"] = w
                     item["height"] = h
-                # thumbnail
                 thumb = _find_thumbnail(file_path)
                 if thumb:
                     thumb_key = f"thumb{i}"
@@ -214,7 +213,7 @@ class TelegramUploader:
                         content_type="image/jpeg",
                     )
 
-            # caption 只放在第一个媒体上
+            # Caption on the first item only
             if i == 0 and caption:
                 item["caption"] = caption
                 item["parse_mode"] = "HTML"
@@ -236,24 +235,24 @@ class TelegramUploader:
                 body = await resp.json()
                 if body.get("ok"):
                     names = [f.name for f in sorted_files]
-                    logger.info("已发送 MediaGroup 到 Telegram (%d 个文件): %s", len(sorted_files), names)
+                    logger.info("Sent MediaGroup (%d files): %s", len(sorted_files), names)
                     return {"status": "sent", "type": "media_group", "count": len(sorted_files)}
                 else:
                     error_desc = body.get("description", "unknown error")
-                    logger.error("Telegram MediaGroup 发送失败: %s", error_desc)
+                    logger.error("MediaGroup failed: %s", error_desc)
                     return {"status": "error", "type": "media_group", "detail": error_desc}
         except Exception as e:
-            logger.exception("Telegram MediaGroup 发送异常")
+            logger.exception("MediaGroup error")
             return {"status": "error", "type": "media_group", "detail": str(e)}
 
     async def _send_single(self, file_path: Path, caption: str = "") -> dict:
-        """
-        发送单个文件，静音模式。
-        根据文件类型自动选择 sendVideo / sendPhoto / sendDocument。
-        超过大小限制的文件跳过（官方 50MB / local 模式 2GB）。
+        """Send a single file (silent).
+
+        Picks sendVideo / sendPhoto / sendDocument based on extension.
+        Files exceeding the size limit are skipped (50 MB official / 2 GB local).
         """
         if not file_path.exists():
-            logger.warning("文件不存在，跳过发送: %s", file_path)
+            logger.warning("File not found, skipping: %s", file_path)
             return {"status": "skipped", "reason": "file_not_found"}
 
         suffix = file_path.suffix.lower()
@@ -262,14 +261,13 @@ class TelegramUploader:
         if file_size > self.max_file_size:
             limit_mb = self.max_file_size // (1024 * 1024)
             logger.warning(
-                "文件超过 %dMB 限制，跳过发送: %s (%dMB)",
+                "File exceeds %d MB limit, skipping: %s (%d MB)",
                 limit_mb, file_path.name, file_size // (1024 * 1024),
             )
             return {"status": "skipped", "reason": "file_too_large"}
 
         session = await self._get_session()
 
-        # 选择 API 方法和字段名
         if suffix in _VIDEO_EXTENSIONS:
             method, field_name, content_type = "sendVideo", "video", "video/mp4"
         elif suffix in _IMAGE_EXTENSIONS:
@@ -288,7 +286,7 @@ class TelegramUploader:
             content_type=content_type,
         )
 
-        # 视频: 附带宽高和缩略图，避免 Telegram 显示为正方形
+        # Video: attach width/height and thumbnail
         if method == "sendVideo":
             w, h = _get_video_dimensions(file_path)
             if w > 0 and h > 0:
@@ -311,17 +309,17 @@ class TelegramUploader:
             async with session.post(url, data=data) as resp:
                 body = await resp.json()
                 if body.get("ok"):
-                    logger.info("已发送到 Telegram: %s (%s)", file_path.name, method)
+                    logger.info("Sent to Telegram: %s (%s)", file_path.name, method)
                     return {"status": "sent", "type": field_name, "file": file_path.name}
                 else:
                     error_desc = body.get("description", "unknown error")
                     logger.error(
-                        "Telegram %s 失败 [%d]: %s → %s",
+                        "%s failed [%d]: %s -> %s",
                         method, resp.status, file_path.name, error_desc,
                     )
                     return {"status": "error", "type": field_name, "file": file_path.name, "detail": error_desc}
         except Exception as e:
-            logger.exception("Telegram %s 异常: %s", method, file_path.name)
+            logger.exception("%s error: %s", method, file_path.name)
             return {"status": "error", "type": field_name, "file": file_path.name, "detail": str(e)}
 
     async def upload_files(
@@ -330,30 +328,29 @@ class TelegramUploader:
         base_dir: Path,
         manifest_entries: Optional[list[dict]] = None,
     ) -> dict:
-        """
-        上传指定文件列表到 Telegram Channel。
-        同一个作品（aweme_id）的视频+封面合并为一条 MediaGroup 消息发送。
+        """Upload files to a Telegram Channel.
+
+        Files sharing the same aweme_id (video + cover) are merged into one MediaGroup.
 
         Args:
-            file_paths: 待发送的文件绝对路径列表
-            base_dir: 下载根目录
-            manifest_entries: manifest 条目列表，用于分组和生成标题
+            file_paths: Absolute paths of files to send.
+            base_dir: Download root directory.
+            manifest_entries: Manifest entries for grouping and caption generation.
         """
         stats = {"sent": 0, "skipped": 0, "failed": 0}
 
-        # 过滤可上传文件
         media_files = [
             f for f in file_paths
             if f.is_file() and f.suffix.lower() in self.upload_extensions
         ]
 
         if not media_files:
-            logger.info("无可发送的媒体文件")
+            logger.info("No media files to send")
             return stats
 
-        logger.info("准备发送 %d 个媒体文件到 Telegram", len(media_files))
+        logger.info("Sending %d media file(s) to Telegram", len(media_files))
 
-        # 构建 aweme_id → manifest entry 映射
+        # Build aweme_id -> manifest entry map
         entry_map: dict[str, dict] = {}
         if manifest_entries:
             for entry in manifest_entries:
@@ -361,13 +358,11 @@ class TelegramUploader:
                 if aweme_id:
                     entry_map[aweme_id] = entry
 
-        # ── 按 aweme_id 分组文件 ──
-        # 每个 aweme 的文件放在同一个子目录下，目录名包含 aweme_id
-        aweme_groups: dict[str, list[Path]] = {}  # aweme_id → [file_paths]
+        # Group files by aweme_id
+        aweme_groups: dict[str, list[Path]] = {}
         ungrouped: list[Path] = []
 
         for file_path in media_files:
-            # 跳过封面图（如果关闭了 send_cover）
             if not self.send_cover and "_cover." in file_path.name:
                 stats["skipped"] += 1
                 continue
@@ -383,36 +378,33 @@ class TelegramUploader:
             else:
                 ungrouped.append(file_path)
 
-        # ── 按组发送 ──
+        # Send grouped files
         for aweme_id, group_files in aweme_groups.items():
             caption = self._build_caption(entry_map[aweme_id]) if aweme_id in entry_map else ""
 
-            # 过滤掉超过大小限制的文件（官方 50MB / local 模式 2GB）
             group_ok: list[Path] = []
             for f in group_files:
                 if f.stat().st_size > self.max_file_size:
                     limit_mb = self.max_file_size // (1024 * 1024)
-                    logger.warning("文件超过 %dMB 限制，跳过: %s (%dMB)", limit_mb, f.name, f.stat().st_size // (1024 * 1024))
+                    logger.warning("Exceeds %d MB, skipping: %s (%d MB)", limit_mb, f.name, f.stat().st_size // (1024 * 1024))
                     stats["skipped"] += 1
                 else:
                     group_ok.append(f)
 
             if len(group_ok) >= 2:
-                # 2 个以上文件：用 MediaGroup 合并发送
                 result = await self._send_media_group(group_ok, caption)
                 if result.get("status") == "sent":
                     stats["sent"] += result.get("count", len(group_ok))
                 else:
                     stats["failed"] += len(group_ok)
             elif len(group_ok) == 1:
-                # 只有 1 个文件：单独发送
                 result = await self._send_single(group_ok[0], caption)
                 if result.get("status") == "sent":
                     stats["sent"] += 1
                 else:
                     stats["failed"] += 1
 
-        # ── 未匹配到 aweme 的文件单独发送 ──
+        # Send ungrouped files individually
         for file_path in ungrouped:
             result = await self._send_single(file_path)
             if result.get("status") == "sent":
@@ -425,16 +417,15 @@ class TelegramUploader:
         return stats
 
 
-# ── 全局单例 ──────────────────────────────────────────────
+# -- Singleton ---------------------------------------------------------
 _uploader: Optional[TelegramUploader] = None
 
 
 def get_telegram_uploader(telegram_config: Optional[dict] = None) -> Optional[TelegramUploader]:
-    """
-    获取全局 TelegramUploader 实例。
+    """Return the global TelegramUploader instance (created on first call).
 
-    优先从 telegram_config (config.yml 的 telegram 段) 读取配置,
-    bot_token / chat_id 若为空则回退到环境变量 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID。
+    Reads from telegram_config (the ``telegram`` section of config.yml).
+    bot_token / chat_id fall back to env vars TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID.
     """
     global _uploader
     if _uploader is not None:
@@ -442,11 +433,9 @@ def get_telegram_uploader(telegram_config: Optional[dict] = None) -> Optional[Te
 
     cfg = telegram_config or {}
 
-    # enabled 开关
     if cfg.get("enabled") is False:
         return None
 
-    # bot_token / chat_id: config.yml 优先，环境变量回退
     bot_token = (cfg.get("bot_token") or "").strip() or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = (cfg.get("chat_id") or "").strip() or os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
@@ -463,7 +452,7 @@ def get_telegram_uploader(telegram_config: Optional[dict] = None) -> Optional[Te
         upload_extensions=cfg.get("upload_extensions"),
     )
     logger.info(
-        "Telegram 上传已启用: chat_id=%s (api_base=%s, timeout=%ds, mode=%s, max_file=%dMB)",
+        "Telegram enabled: chat_id=%s (api_base=%s, timeout=%ds, mode=%s, max_file=%dMB)",
         chat_id, _uploader.api_base, _uploader.upload_timeout,
         "local" if _uploader.is_local else "official",
         _uploader.max_file_size // (1024 * 1024),

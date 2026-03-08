@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """
-Immich 上传模块：将下载完成的文件通过 Immich API 上传，然后删除本地文件。
+Immich upload module.
 
-使用 Immich 标准 REST API:
+Uploads downloaded files to an Immich instance via its REST API, then
+optionally groups them into albums by author name.
+
+Uses the standard Immich REST API:
   POST /api/assets  (multipart/form-data)
   Header: x-api-key
 """
@@ -21,7 +24,7 @@ logger = setup_logger("ImmichUploader")
 
 
 class ImmichUploader:
-    """将本地文件上传到 Immich 并清理本地副本"""
+    """Uploads local files to Immich and organizes them into albums."""
 
     def __init__(
         self,
@@ -42,7 +45,7 @@ class ImmichUploader:
             ".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif",
         }
         self._session: Optional[aiohttp.ClientSession] = None
-        self._album_cache: dict[str, str] = {}  # album_name → album_id 缓存
+        self._album_cache: dict[str, str] = {}  # album_name -> album_id
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -57,13 +60,13 @@ class ImmichUploader:
             await self._session.close()
 
     async def _ensure_album(self, album_name: str) -> Optional[str]:
-        """确保目标相册存在，返回相册 ID。结果会被缓存。"""
+        """Return the album ID for *album_name*, creating the album if needed."""
         if album_name in self._album_cache:
             return self._album_cache[album_name]
 
         session = await self._get_session()
 
-        # 1. 查找已有相册
+        # Look for an existing album
         try:
             async with session.get(f"{self.api_url}/api/albums") as resp:
                 if resp.status == 200:
@@ -71,12 +74,12 @@ class ImmichUploader:
                     for album in albums:
                         if album.get("albumName") == album_name:
                             self._album_cache[album_name] = album["id"]
-                            logger.info("找到已有 Immich 相册: %s (id=%s)", album_name, album["id"])
+                            logger.info("Found Immich album: %s (id=%s)", album_name, album["id"])
                             return album["id"]
         except Exception as e:
-            logger.warning("查询 Immich 相册列表失败: %s", e)
+            logger.warning("Failed to list Immich albums: %s", e)
 
-        # 2. 没找到则创建
+        # Create a new one
         try:
             payload = {"albumName": album_name}
             async with session.post(f"{self.api_url}/api/albums", json=payload) as resp:
@@ -84,24 +87,24 @@ class ImmichUploader:
                     body = await resp.json()
                     album_id = body["id"]
                     self._album_cache[album_name] = album_id
-                    logger.info("创建 Immich 相册: %s (id=%s)", album_name, album_id)
+                    logger.info("Created Immich album: %s (id=%s)", album_name, album_id)
                     return album_id
                 else:
                     body = await resp.json()
-                    logger.error("创建 Immich 相册失败 [%d]: %s", resp.status, body)
+                    logger.error("Album creation failed [%d]: %s", resp.status, body)
         except Exception as e:
-            logger.exception("创建 Immich 相册异常: %s", e)
+            logger.exception("Album creation error: %s", e)
 
         return None
 
     async def _add_assets_to_album(self, album_name: str, asset_ids: list[str]):
-        """将资产批量添加到指定相册"""
+        """Add assets to the given album in bulk."""
         if not asset_ids:
             return
 
         album_id = await self._ensure_album(album_name)
         if not album_id:
-            logger.warning("无法获取相册 ID，跳过添加到相册: %s", album_name)
+            logger.warning("Could not resolve album ID, skipping: %s", album_name)
             return
 
         session = await self._get_session()
@@ -113,55 +116,53 @@ class ImmichUploader:
                 if resp.status == 200:
                     results = await resp.json()
                     added = sum(1 for r in results if r.get("success"))
-                    logger.info("已将 %d/%d 个资产添加到相册 '%s'", added, len(asset_ids), album_name)
+                    logger.info("Added %d/%d asset(s) to album '%s'", added, len(asset_ids), album_name)
                 else:
                     body = await resp.json()
-                    logger.error("添加资产到相册失败 [%d]: %s", resp.status, body)
+                    logger.error("Failed to add assets to album [%d]: %s", resp.status, body)
         except Exception as e:
-            logger.exception("添加资产到相册异常: %s", e)
+            logger.exception("Error adding assets to album: %s", e)
 
     async def _restore_from_trash(self, asset_id: str) -> bool:
-        """尝试将资产从 Immich 垃圾箱恢复。用户在 Immich 中删除的文件会进垃圾箱，
-        重新上传时 Immich 返回 duplicate，此时需要调用 restore 接口恢复。"""
+        """Try to restore an asset from the Immich trash.
+
+        When a user deletes a file in Immich it goes to trash.  Re-uploading
+        the same file returns ``duplicate``, so we call the restore endpoint
+        to bring it back.
+        """
         session = await self._get_session()
         url = f"{self.api_url}/api/trash/restore/assets"
         payload = {"ids": [asset_id]}
         try:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 204:
-                    logger.info("已从 Immich 垃圾箱恢复: asset_id=%s", asset_id)
+                    logger.info("Restored from Immich trash: asset_id=%s", asset_id)
                     return True
                 else:
-                    # 可能资产不在垃圾箱中（正常 duplicate），忽略即可
                     logger.debug(
-                        "垃圾箱恢复返回 [%d] (asset_id=%s，可能不在垃圾箱中)",
+                        "Trash restore returned [%d] (asset_id=%s, probably not in trash)",
                         resp.status, asset_id,
                     )
                     return False
         except Exception as e:
-            logger.warning("垃圾箱恢复异常 (asset_id=%s): %s", asset_id, e)
+            logger.warning("Trash restore error (asset_id=%s): %s", asset_id, e)
             return False
 
     async def upload_file(self, file_path: Path, *, force: bool = False) -> dict:
-        """
-        上传单个文件到 Immich。
+        """Upload a single file to Immich.
 
-        Immich POST /api/assets 要求：
-        - multipart/form-data
-        - assetData: 文件二进制
-        - deviceAssetId: 唯一标识（使用文件名）
-        - deviceId: 设备标识
-        - fileCreatedAt: ISO 格式时间
-        - fileModifiedAt: ISO 格式时间
+        Immich ``POST /api/assets`` expects multipart/form-data with fields:
+        assetData, deviceAssetId, deviceId, fileCreatedAt, fileModifiedAt.
 
-        当 force=True 时，如果 Immich 返回 duplicate，会自动尝试从垃圾箱恢复该资产，
-        确保用户在 Immich 中手动删除过的文件能被重新恢复。
+        When *force* is True and Immich returns ``duplicate``, the asset is
+        automatically restored from trash (in case the user deleted it in
+        Immich earlier).
 
-        返回值示例:
-          {"id": "uuid", "status": "created"} 或 {"id": "uuid", "status": "duplicate"}
+        Returns e.g. {"id": "uuid", "status": "created"} or
+        {"id": "uuid", "status": "duplicate"}.
         """
         if not file_path.exists():
-            logger.warning("文件不存在，跳过上传: %s", file_path)
+            logger.warning("File not found, skipping: %s", file_path)
             return {"status": "skipped", "reason": "file_not_found"}
 
         stat = file_path.stat()
@@ -192,38 +193,37 @@ class ImmichUploader:
                     asset_id = body.get("id", "")
                     if resp.status == 201:
                         logger.info(
-                            "已上传到 Immich: %s (asset_id=%s)",
+                            "Uploaded to Immich: %s (asset_id=%s)",
                             file_path.name,
                             asset_id,
                         )
                     else:
                         # 200 = duplicate
                         if force and asset_id:
-                            # force 模式：尝试从垃圾箱恢复（用户可能在 Immich 中删除过）
                             restored = await self._restore_from_trash(asset_id)
                             if restored:
                                 logger.info(
-                                    "Immich 重复但已从垃圾箱恢复: %s (asset_id=%s)",
+                                    "Duplicate but restored from trash: %s (asset_id=%s)",
                                     file_path.name,
                                     asset_id,
                                 )
                                 return {"status": "restored", "id": asset_id, "http": resp.status}
                         logger.info(
-                            "Immich 重复跳过: %s (asset_id=%s)",
+                            "Duplicate, skipped: %s (asset_id=%s)",
                             file_path.name,
                             asset_id,
                         )
                     return {"status": status, "id": asset_id, "http": resp.status}
                 else:
                     logger.error(
-                        "Immich 上传失败 [%d]: %s → %s",
+                        "Immich upload failed [%d]: %s -> %s",
                         resp.status,
                         file_path.name,
                         body,
                     )
                     return {"status": "error", "http": resp.status, "detail": body}
         except Exception as e:
-            logger.exception("Immich 上传异常: %s", file_path.name)
+            logger.exception("Immich upload error: %s", file_path.name)
             return {"status": "error", "detail": str(e)}
 
     async def upload_files(
@@ -233,35 +233,34 @@ class ImmichUploader:
         *,
         force: bool = True,
     ) -> dict:
-        """
-        上传指定文件列表到 Immich。
+        """Upload a specific list of files to Immich.
 
-        与 upload_directory 不同，此方法只上传明确指定的文件，
-        适用于"本次下载产生的文件"场景。
+        Unlike ``upload_directory``, this only touches the files you pass in —
+        useful for "files produced by this download" scenarios.
 
         Args:
-            file_paths: 待上传的文件绝对路径列表
-            base_dir: 下载根目录（用于解析作者名，即一级子目录名）
-            force: 若为 True，对 Immich 返回 duplicate 的资产尝试从垃圾箱恢复
+            file_paths: Absolute paths to upload.
+            base_dir: Download root (used to derive author name from the first
+                      path component, e.g. ``base_dir/<author>/...``).
+            force: If True, try restoring from Immich trash on duplicates.
         """
         stats = {"uploaded": 0, "duplicates": 0, "restored": 0, "skipped": 0, "failed": 0}
 
-        # 过滤：只保留存在且扩展名匹配的文件
         media_files = [
             f for f in file_paths
             if f.is_file() and f.suffix.lower() in self.upload_extensions
         ]
 
         if not media_files:
-            logger.info("无可上传的媒体文件")
+            logger.info("No media files to upload")
             return stats
 
-        logger.info("准备上传 %d 个媒体文件到 Immich", len(media_files))
+        logger.info("Uploading %d media file(s) to Immich", len(media_files))
 
         author_asset_ids: dict[str, list[str]] = {}
 
         for file_path in media_files:
-            # 解析作者名：base_dir/<作者名>/...
+            # Derive author name from first path component under base_dir
             try:
                 rel = file_path.relative_to(base_dir)
                 author_name = rel.parts[0] if len(rel.parts) > 1 else None
@@ -289,7 +288,7 @@ class ImmichUploader:
             else:
                 stats["failed"] += 1
 
-        # 按作者分别添加到对应相册
+        # Add assets to per-author albums
         for author_name, asset_ids in author_asset_ids.items():
             album_name = f"{self.album_prefix}{author_name}"
             await self._add_assets_to_album(album_name, asset_ids)
@@ -297,19 +296,17 @@ class ImmichUploader:
         return stats
 
     async def upload_directory(self, directory: Path) -> dict:
-        """
-        扫描目录（递归），将所有符合条件的媒体文件上传到 Immich。
-        按一级子目录（作者名）分组，每个作者创建独立相册 "douyin-作者名"。
+        """Recursively scan a directory and upload all matching media to Immich.
 
-        返回统计信息。
+        Files are grouped by first-level subdirectory (author name), and each
+        author gets its own album (``<album_prefix><author>``).
         """
         if not directory.exists():
-            logger.warning("目录不存在: %s", directory)
+            logger.warning("Directory does not exist: %s", directory)
             return {"uploaded": 0, "skipped": 0, "failed": 0, "deleted": 0}
 
         stats = {"uploaded": 0, "duplicates": 0, "skipped": 0, "failed": 0}
 
-        # 收集所有待上传文件
         media_files = sorted(
             f
             for f in directory.rglob("*")
@@ -317,16 +314,14 @@ class ImmichUploader:
         )
 
         if not media_files:
-            logger.info("目录中无可上传的媒体文件: %s", directory)
+            logger.info("No media files in directory: %s", directory)
             return stats
 
-        logger.info("发现 %d 个媒体文件待上传到 Immich: %s", len(media_files), directory)
+        logger.info("Found %d media file(s) to upload: %s", len(media_files), directory)
 
-        # 按作者（一级子目录名）分组收集 asset ID
         author_asset_ids: dict[str, list[str]] = {}
 
         for file_path in media_files:
-            # 解析作者名：Downloaded/<作者名>/...
             try:
                 rel = file_path.relative_to(directory)
                 author_name = rel.parts[0] if len(rel.parts) > 1 else None
@@ -343,7 +338,6 @@ class ImmichUploader:
                     author_asset_ids.setdefault(author_name, []).append(asset_id)
             elif result.get("http") == 200:
                 stats["duplicates"] += 1
-                # 重复的资产也加入相册（可能之前未加入）
                 if asset_id and author_name:
                     author_asset_ids.setdefault(author_name, []).append(asset_id)
             elif status == "skipped":
@@ -351,26 +345,24 @@ class ImmichUploader:
             else:
                 stats["failed"] += 1
 
-        # 按作者分别添加到对应相册
         for author_name, asset_ids in author_asset_ids.items():
             album_name = f"{self.album_prefix}{author_name}"
             await self._add_assets_to_album(album_name, asset_ids)
 
-        # 上传完成后不删除本地文件，保留用于下载器去重
+        # Keep local files around — the downloader uses them for dedup
         return stats
 
 
 
-# ── 全局单例 ──────────────────────────────────────────────
+# -- Singleton ---------------------------------------------------------
 _uploader: Optional[ImmichUploader] = None
 
 
 def get_immich_uploader(immich_config: Optional[dict] = None) -> Optional[ImmichUploader]:
-    """
-    获取全局 ImmichUploader 实例。
+    """Return the global ImmichUploader instance (created on first call).
 
-    优先从 immich_config（config.yml 的 immich 段）读取配置，
-    api_url / api_key 若为空则回退到环境变量 IMMICH_API_URL / IMMICH_API_KEY。
+    Reads from immich_config (the ``immich`` section of config.yml).
+    api_url / api_key fall back to env vars IMMICH_API_URL / IMMICH_API_KEY.
     """
     global _uploader
     if _uploader is not None:
@@ -378,11 +370,9 @@ def get_immich_uploader(immich_config: Optional[dict] = None) -> Optional[Immich
 
     cfg = immich_config or {}
 
-    # enabled 开关：如果显式设为 false 则禁用
     if cfg.get("enabled") is False:
         return None
 
-    # api_url / api_key：config.yml 优先，环境变量回退
     api_url = (cfg.get("api_url") or "").strip() or os.environ.get("IMMICH_API_URL", "").strip()
     api_key = (cfg.get("api_key") or "").strip() or os.environ.get("IMMICH_API_KEY", "").strip()
 
@@ -397,6 +387,6 @@ def get_immich_uploader(immich_config: Optional[dict] = None) -> Optional[Immich
         upload_timeout=cfg.get("upload_timeout", 600),
         upload_extensions=cfg.get("upload_extensions"),
     )
-    logger.info("Immich 上传已启用: %s (album_prefix=%s, device=%s, timeout=%ds)",
+    logger.info("Immich enabled: %s (album_prefix=%s, device=%s, timeout=%ds)",
                 api_url, _uploader.album_prefix, _uploader.device_id, _uploader.upload_timeout)
     return _uploader

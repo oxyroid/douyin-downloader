@@ -2,10 +2,10 @@ FROM aiogram/telegram-bot-api:latest
 
 USER root
 
-# 安装 proxychains-ng
+# Install proxychains-ng for SOCKS5 proxy support
 RUN apk add --no-cache proxychains-ng
 
-# 生成 proxychains 配置（运行时由 entrypoint 覆盖）
+# Entrypoint generates proxychains config at runtime
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

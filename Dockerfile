@@ -2,22 +2,22 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# 系统依赖（playwright 需要的最小运行时，可选）
+# System dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         curl \
         ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# Python 依赖
+# Python dependencies
 COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir fastapi uvicorn[standard]
 
-# 复制项目代码
+# Application code
 COPY app/ .
 
-# 下载目录
+# Download directory
 RUN mkdir -p /app/Downloaded
 
 EXPOSE 8000

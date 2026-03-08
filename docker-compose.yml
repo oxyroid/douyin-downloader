@@ -1,5 +1,5 @@
 services:
-  # ── 自建 Telegram Bot API Server (local 模式，支持上传 2GB 文件) ──
+  # Self-hosted Telegram Bot API Server (local mode, up to 2 GB uploads)
   telegram-bot-api:
     build:
       context: ./telegram-bot-api
@@ -10,7 +10,7 @@ services:
       - TELEGRAM_API_HASH=${TELEGRAM_API_HASH}
       - TELEGRAM_LOCAL=true
       - TELEGRAM_HTTP_PORT=8081
-      # proxychains 代理配置 (通过宿主机代理访问 Telegram DC)
+      # proxychains proxy config (routes through host SOCKS5 proxy to reach Telegram DC)
       - PROXY_HOST=host.docker.internal
       - PROXY_PORT=7890
       - PROXY_TYPE=socks5
@@ -32,19 +32,19 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # 下载文件持久化到宿主机
+      # Persist downloaded files to host
       - ./downloads:/app/Downloaded
-      # 配置文件挂载（宿主机修改后重启容器生效）
+      # Mount config (restart container after changes)
       - ./app/config.yml:/app/config.yml:ro
     environment:
       - DY_CONFIG_PATH=config.yml
-      # Immich 配置已移至 config.yml，以下环境变量作为备用/覆盖
+      # Immich config lives in config.yml; env vars below are fallbacks
       - IMMICH_API_URL=http://host.docker.internal:2283
       - IMMICH_API_KEY=${IMMICH_API_KEY}
-      # Telegram 配置已移至 config.yml，以下环境变量作为备用/覆盖
+      # Telegram config lives in config.yml; env vars below are fallbacks
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
-      # 如需 transcript 功能，取消下行注释
+      # Uncomment for transcript support
       # - OPENAI_API_KEY=sk-xxxx
     extra_hosts:
       - "host.docker.internal:host-gateway"

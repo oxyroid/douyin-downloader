@@ -5,17 +5,17 @@ PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
 PROXY_PORT="${PROXY_PORT:-7890}"
 PROXY_TYPE="${PROXY_TYPE:-socks5}"
 
-# 如果 PROXY_HOST 是域名，解析为 IPv4 地址
+# If PROXY_HOST is a hostname, resolve it to an IPv4 address
 RESOLVED_HOST=$(getent ahostsv4 "$PROXY_HOST" 2>/dev/null | awk '{print $1}' | head -1)
 if [ -z "$RESOLVED_HOST" ]; then
-  # 回退到通用解析
+  # Fall back to generic resolution
   RESOLVED_HOST=$(getent hosts "$PROXY_HOST" 2>/dev/null | awk '{print $1}' | head -1)
 fi
 if [ -z "$RESOLVED_HOST" ]; then
   RESOLVED_HOST="$PROXY_HOST"
 fi
 
-# 生成 proxychains 配置
+# Generate proxychains config
 cat > /etc/proxychains/proxychains.conf << EOF
 strict_chain
 proxy_dns
@@ -28,7 +28,7 @@ EOF
 
 echo "proxychains: ${PROXY_TYPE} ${RESOLVED_HOST}:${PROXY_PORT} (${PROXY_HOST})"
 
-# 通过 proxychains 启动 telegram-bot-api
+# Launch telegram-bot-api through proxychains
 exec proxychains4 -q telegram-bot-api \
   --dir=/var/lib/telegram-bot-api \
   --temp-dir=/tmp/telegram-bot-api \
