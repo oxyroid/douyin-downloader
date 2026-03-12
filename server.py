@@ -25,14 +25,17 @@ class UTF8JSONResponse(JSONResponse):
     def render(self, content) -> bytes:
         return json.dumps(content, ensure_ascii=False).encode("utf-8")
 
-# Ensure the project root is on sys.path
+# Ensure the app directory is on sys.path
+app_dir = Path(__file__).parent / "app"
 project_root = Path(__file__).parent
+if str(app_dir) not in sys.path:
+    sys.path.insert(0, str(app_dir))
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 import os
 
-os.chdir(project_root)
+os.chdir(app_dir)
 
 from config import ConfigLoader
 from auth import CookieManager
@@ -40,7 +43,7 @@ from storage import Database
 from cli.main import download_url
 from immich_uploader import get_immich_uploader
 from telegram_uploader import get_telegram_uploader
-from utils.logger import setup_logger, set_console_log_level
+from app.utils.logger import setup_logger, set_console_log_level
 
 logger = setup_logger("Server")
 set_console_log_level(logging.INFO)

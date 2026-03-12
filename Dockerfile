@@ -14,8 +14,13 @@ COPY app/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && pip install --no-cache-dir fastapi uvicorn[standard]
 
-# Application code
-COPY app/ .
+# Core downloader (upstream code)
+COPY app/ ./app/
+
+# Custom modules (server + uploaders)
+COPY server.py .
+COPY immich_uploader.py .
+COPY telegram_uploader.py .
 
 # Download directory
 RUN mkdir -p /app/Downloaded

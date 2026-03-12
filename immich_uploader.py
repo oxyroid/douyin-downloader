@@ -18,7 +18,7 @@ from typing import Optional
 
 import aiohttp
 
-from utils.logger import setup_logger
+from app.utils.logger import setup_logger
 
 logger = setup_logger("ImmichUploader")
 
