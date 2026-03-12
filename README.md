@@ -70,7 +70,7 @@ immich:
 telegram:
   enabled: true
   bot_token: '123456:ABC-DEF...'
-  chat_id: '@my_channel'
+  chat_id: '-1001234567890'       # Channel/Group ID (use @username or numeric ID like -100xxx)
   # Self-hosted Bot API for files >50MB (optional)
   api_base: 'http://telegram-bot-api:8081'
   api_id: 'your_api_id'       # from my.telegram.org

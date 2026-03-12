@@ -10,6 +10,10 @@ docker-compose.override.yml
 # OS
 .DS_Store
 
+# IDE
+.idea/
+.vscode/
+
 # Python
 __pycache__/
 *.py[cod]
