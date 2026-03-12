@@ -1,4 +1,4 @@
-# Douyin Downloader
+# Douyin Downloader Wrapper
 
 Docker HTTP wrapper for [douyin-downloader](./app/README.md) with [Immich](https://immich.app/) and [Telegram](https://telegram.org/) integration. Works great with iOS Shortcuts.
 
