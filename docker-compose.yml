@@ -13,12 +13,7 @@ services:
       - ./config.yml:/app/app/config.yml:ro
     environment:
       - DY_CONFIG_PATH=config.yml
-      # Immich config lives in config.yml; env vars below are fallbacks
-      - IMMICH_API_URL=http://host.docker.internal:2283
-      - IMMICH_API_KEY=${IMMICH_API_KEY}
-      # Telegram config lives in config.yml; env vars below are fallbacks
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      # All config now lives in config.yml
       # Uncomment for transcript support
       # - OPENAI_API_KEY=sk-xxxx
     extra_hosts:

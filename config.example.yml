@@ -83,3 +83,6 @@ telegram:
   api_base: ""  # Leave empty to use official API, or set to local Bot API server URL
   send_cover: true
   caption_template: "<b>{author}:</b> {desc}"
+  # Telegram API credentials (for future Telethon/Pyrogram support)
+  # api_id: ""
+  # api_hash: ""

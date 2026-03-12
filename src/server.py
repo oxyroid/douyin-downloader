@@ -26,12 +26,15 @@ class UTF8JSONResponse(JSONResponse):
         return json.dumps(content, ensure_ascii=False).encode("utf-8")
 
 # Ensure the app directory is on sys.path
-app_dir = Path(__file__).parent / "app"
-project_root = Path(__file__).parent
+project_root = Path(__file__).parent.parent  # src/../ = project root
+app_dir = project_root / "app"
+src_dir = Path(__file__).parent  # src/
 if str(app_dir) not in sys.path:
     sys.path.insert(0, str(app_dir))
 if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 import os
 
@@ -41,8 +44,8 @@ from config import ConfigLoader
 from auth import CookieManager
 from storage import Database
 from cli.main import download_url
-from immich_uploader import get_immich_uploader
-from telegram_uploader import get_telegram_uploader
+from uploaders.immich import get_immich_uploader
+from uploaders.telegram import get_telegram_uploader
 from app.utils.logger import setup_logger, set_console_log_level
 
 logger = setup_logger("Server")

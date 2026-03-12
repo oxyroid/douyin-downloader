@@ -1,6 +1,3 @@
-# Environment variables (contains API keys and sensitive info)
-.env
-
 # Config file (contains bot tokens, API keys)
 config.yml
 

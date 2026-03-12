@@ -18,13 +18,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 COPY app/ ./app/
 
 # Custom modules (server + uploaders)
-COPY server.py .
-COPY immich_uploader.py .
-COPY telegram_uploader.py .
+COPY src/ ./src/
 
 # Download directory
 RUN mkdir -p /app/Downloaded
 
 EXPOSE 8000
 
-CMD ["uvicorn", "server:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "src.server:app", "--host", "0.0.0.0", "--port", "8000"]
