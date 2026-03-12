@@ -7,12 +7,18 @@ douyin-downloader CLI core to perform downloads.
 import asyncio
 import json
 import logging
+import os
+import shutil
 import sys
 import time
 import uuid
+from contextlib import asynccontextmanager
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote
+
+import aiohttp
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -36,8 +42,6 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
-
-import os
 
 os.chdir(app_dir)
 
@@ -87,7 +91,6 @@ async def _resolve_short_url(url: str) -> str:
     if "v.douyin.com" not in url:
         return url
     try:
-        import aiohttp
         async with aiohttp.ClientSession() as session:
             async with session.get(url, allow_redirects=True, timeout=aiohttp.ClientTimeout(total=10)) as resp:
                 resolved = str(resp.url)
@@ -125,7 +128,57 @@ class ConfigurationError(Exception):
     pass
 
 
-app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse)
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup / shutdown lifecycle for the FastAPI application."""
+    # -- Startup --
+    try:
+        config = await _get_config()
+        cookies = config.get("cookies", {})
+        status = _check_cookies_status(cookies)
+
+        if not status["valid"]:
+            logger.warning("=" * 60)
+            logger.warning("  ⚠️  COOKIES NOT CONFIGURED")
+            logger.warning("=" * 60)
+            logger.warning(status["message"])
+            logger.warning("")
+            logger.warning("To initialize cookies, run on your HOST machine:")
+            logger.warning("  pip install playwright pyyaml")
+            logger.warning("  playwright install chromium")
+            logger.warning("  python scripts/init-cookies.py")
+            logger.warning("")
+            logger.warning("Or visit: http://localhost:8000/init for detailed instructions.")
+            logger.warning("=" * 60)
+        else:
+            logger.info("✅ Cookies configured and ready.")
+    except ConfigurationError as e:
+        logger.error("=" * 60)
+        logger.error("  ❌  CONFIGURATION ERROR")
+        logger.error("=" * 60)
+        logger.error(str(e))
+        logger.error("=" * 60)
+        # Don't raise - let the server start so /health and /init can provide guidance
+
+    yield
+
+    # -- Shutdown --
+    try:
+        immich = get_immich_uploader()
+        if immich:
+            await immich.close()
+    except Exception as e:
+        logger.warning("Error closing Immich uploader: %s", e)
+
+    try:
+        tg = get_telegram_uploader()
+        if tg:
+            await tg.close()
+    except Exception as e:
+        logger.warning("Error closing Telegram uploader: %s", e)
+
+
+app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse, lifespan=_lifespan)
 
 
 @app.exception_handler(ConfigurationError)
@@ -220,8 +273,12 @@ class DownloadResponse(BaseModel):
 _tasks: dict[str, dict] = {}
 # URL -> task_id mapping to prevent duplicate downloads
 _url_to_task: dict[str, str] = {}
+# Lock for concurrent access to _tasks / _url_to_task
+_task_lock = asyncio.Lock()
 # Maximum number of completed tasks to keep in memory
 _MAX_COMPLETED_TASKS = 1000
+# TTL for completed/failed tasks (seconds) — tasks older than this are eligible for cleanup
+_TASK_TTL_SECONDS = 3600  # 1 hour
 
 # -- Metrics -----------------------------------------------------------
 _metrics = {
@@ -245,31 +302,47 @@ def _normalize_url(url: str) -> str:
 
 
 def _cleanup_old_tasks():
-    """Remove oldest completed/failed tasks when we exceed the limit."""
-    completed_tasks = [
-        (tid, info) for tid, info in _tasks.items()
-        if info.get("status") in ("completed", "failed")
-    ]
-    
-    if len(completed_tasks) <= _MAX_COMPLETED_TASKS:
-        return
-    
-    # Sort by completion time (if tracked) or just take first N
-    # Since we don't track time, remove oldest entries (dict is ordered in Python 3.7+)
-    to_remove = len(completed_tasks) - _MAX_COMPLETED_TASKS
+    """Remove expired or excess completed/failed tasks.
+
+    Tasks are removed if they exceed _TASK_TTL_SECONDS or if the total
+    number of completed tasks exceeds _MAX_COMPLETED_TASKS.
+    """
+    now = time.time()
     removed = 0
+
+    # First pass: remove tasks that have exceeded TTL
     for tid in list(_tasks.keys()):
-        if removed >= to_remove:
-            break
-        if _tasks.get(tid, {}).get("status") in ("completed", "failed"):
+        info = _tasks.get(tid, {})
+        if info.get("status") not in ("completed", "failed"):
+            continue
+        completed_at = info.get("completed_at", 0)
+        if completed_at and (now - completed_at) > _TASK_TTL_SECONDS:
             del _tasks[tid]
-            # Also clean up URL mapping
             for url, mapped_tid in list(_url_to_task.items()):
                 if mapped_tid == tid:
                     del _url_to_task[url]
                     break
             removed += 1
-    
+
+    # Second pass: enforce max count
+    completed_tasks = [
+        (tid, info) for tid, info in _tasks.items()
+        if info.get("status") in ("completed", "failed")
+    ]
+
+    if len(completed_tasks) > _MAX_COMPLETED_TASKS:
+        # Sort by completed_at ascending so oldest are removed first
+        completed_tasks.sort(key=lambda x: x[1].get("completed_at", 0))
+        to_remove = len(completed_tasks) - _MAX_COMPLETED_TASKS
+        for tid, _ in completed_tasks[:to_remove]:
+            if tid in _tasks:
+                del _tasks[tid]
+                for url, mapped_tid in list(_url_to_task.items()):
+                    if mapped_tid == tid:
+                        del _url_to_task[url]
+                        break
+                removed += 1
+
     if removed > 0:
         logger.debug("Cleaned up %d old tasks", removed)
 
@@ -298,11 +371,7 @@ async def _run_download(task_id: str, req: DownloadRequest):
         config = await _get_config()
 
         # Deep-copy config so per-request overrides don't leak globally
-        from copy import deepcopy
-
-        task_config = ConfigLoader.__new__(ConfigLoader)
-        task_config.config_path = config.config_path
-        task_config.config = deepcopy(config.config)
+        task_config = deepcopy(config)
 
         task_config.update(link=[req.url])
 
@@ -334,6 +403,7 @@ async def _run_download(task_id: str, req: DownloadRequest):
         if result:
             _tasks[task_id].update(
                 status="completed",
+                completed_at=time.time(),
                 total=result.total,
                 success=result.success,
                 failed=result.failed,
@@ -435,11 +505,11 @@ async def _run_download(task_id: str, req: DownloadRequest):
                     logger.exception("Telegram send failed")
                     _tasks[task_id]["message"] += f" | Telegram send failed: {e}"
         else:
-            _tasks[task_id].update(status="failed", message="Download failed or invalid link")
+            _tasks[task_id].update(status="failed", completed_at=time.time(), message="Download failed or invalid link")
 
     except Exception as e:
         logger.exception("Download task %s failed", task_id)
-        _tasks[task_id].update(status="failed", message=str(e))
+        _tasks[task_id].update(status="failed", completed_at=time.time(), message=str(e))
     finally:
         # Clean up old tasks to prevent memory leak
         _cleanup_old_tasks()
@@ -464,9 +534,18 @@ def _task_to_response(task_id: str, url: str = "") -> DownloadResponse:
 
 async def _submit_task(url: str, req: DownloadRequest) -> DownloadResponse:
     """Shared task submission: dedup check -> create task -> sync/async exec."""
+    # Check dedup against original URL
     existing = _find_existing_task(url)
     if existing:
         return _task_to_response(existing, url)
+
+    # Also check resolved URL for short links to avoid duplicate downloads
+    if "v.douyin.com" in url:
+        resolved = await _resolve_short_url(url)
+        if resolved != url:
+            existing = _find_existing_task(resolved)
+            if existing:
+                return _task_to_response(existing, url)
 
     task_id = uuid.uuid4().hex[:12]
     _tasks[task_id] = {
@@ -630,7 +709,6 @@ async def deep_health_check():
     immich = get_immich_uploader(config.get("immich", {}))
     if immich:
         try:
-            import aiohttp
             async with aiohttp.ClientSession(
                 headers={"x-api-key": immich.api_key},
                 timeout=aiohttp.ClientTimeout(total=10),
@@ -659,9 +737,9 @@ async def deep_health_check():
     tg = get_telegram_uploader(config.get("telegram", {}))
     if tg:
         try:
-            import aiohttp
+            tg_api_url = f"{tg.api_base}/bot{tg.bot_token}"
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-                async with session.get(f"{tg._api_url}/getMe") as resp:
+                async with session.get(f"{tg_api_url}/getMe") as resp:
                     body = await resp.json()
                     if body.get("ok"):
                         bot_info = body.get("result", {})
@@ -875,15 +953,13 @@ async def init_info():
     }
 
 
-@app.api_route("/reset", methods=["GET", "POST"])
+@app.post("/reset")
 async def reset_downloads():
     """Wipe the download directory, manifest, and DB records.
 
     After this, subsequent requests will re-download everything and
     re-upload to Immich.
     """
-    import shutil
-
     config = await _get_config()
     download_dir = Path(config.get("path", "./Downloaded/"))
 
@@ -937,55 +1013,6 @@ async def reset_downloads():
     result["summary"] = "\n".join(parts)
 
     return result
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Check cookies status on startup and log warnings if not configured."""
-    try:
-        config = await _get_config()
-        cookies = config.get("cookies", {})
-        status = _check_cookies_status(cookies)
-        
-        if not status["valid"]:
-            logger.warning("=" * 60)
-            logger.warning("  ⚠️  COOKIES NOT CONFIGURED")
-            logger.warning("=" * 60)
-            logger.warning(status["message"])
-            logger.warning("")
-            logger.warning("To initialize cookies, run on your HOST machine:")
-            logger.warning("  pip install playwright pyyaml")
-            logger.warning("  playwright install chromium")
-            logger.warning("  python scripts/init-cookies.py")
-            logger.warning("")
-            logger.warning("Or visit: http://localhost:8000/init for detailed instructions.")
-            logger.warning("=" * 60)
-        else:
-            logger.info("✅ Cookies configured and ready.")
-    except ConfigurationError as e:
-        logger.error("=" * 60)
-        logger.error("  ❌  CONFIGURATION ERROR")
-        logger.error("=" * 60)
-        logger.error(str(e))
-        logger.error("=" * 60)
-        # Don't raise - let the server start so /health and /init can provide guidance
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    try:
-        immich = get_immich_uploader()
-        if immich:
-            await immich.close()
-    except Exception as e:
-        logger.warning("Error closing Immich uploader: %s", e)
-    
-    try:
-        tg = get_telegram_uploader()
-        if tg:
-            await tg.close()
-    except Exception as e:
-        logger.warning("Error closing Telegram uploader: %s", e)
 
 
 if __name__ == "__main__":

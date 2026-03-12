@@ -92,7 +92,7 @@ curl http://localhost:8000/metrics
 curl -X POST http://localhost:8000/reload-config
 
 # Reset all downloads
-curl http://localhost:8000/reset
+curl -X POST http://localhost:8000/reset
 ```
 
 ## Common Pitfalls

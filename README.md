@@ -203,12 +203,12 @@ Get initialization instructions and cookie status.
 curl http://localhost:8000/init
 ```
 
-### GET/POST `/reset`
+### POST `/reset`
 
 Clear downloads and DB. Next request re-downloads everything.
 
 ```bash
-curl http://localhost:8000/reset
+curl -X POST http://localhost:8000/reset
 ```
 
 **Response example:**
