@@ -10,7 +10,7 @@ services:
       # Persist downloaded files to host
       - ./downloads:/app/app/Downloaded
       # Mount config (restart container after changes)
-      - ./app/config.yml:/app/app/config.yml:ro
+      - ./config.yml:/app/app/config.yml:ro
     environment:
       - DY_CONFIG_PATH=config.yml
       # Immich config lives in config.yml; env vars below are fallbacks

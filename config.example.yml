@@ -1,0 +1,85 @@
+link:
+  - https://www.douyin.com/user/MS4wLjABAAAAxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+path: ./Downloaded/
+
+music: false
+cover: true
+avatar: false
+json: true
+
+start_time: ""
+end_time: ""
+
+folderstyle: true
+
+mode:
+  - post
+
+number:
+  post: 0
+  like: 0
+  allmix: 0
+  mix: 0
+  music: 0
+  collect: 0
+  collectmix: 0
+
+increase:
+  post: false
+  like: false
+  allmix: false
+  mix: false
+  music: false
+
+thread: 5
+retry_times: 3
+proxy: ""
+database: true
+database_path: dy_downloader.db
+
+progress:
+  quiet_logs: true
+
+transcript:
+  enabled: false
+  model: gpt-4o-mini-transcribe
+  output_dir: ""
+  response_formats:
+    - txt
+    - json
+  api_url: https://api.openai.com/v1/audio/transcriptions
+  api_key_env: OPENAI_API_KEY
+  api_key: ""
+
+browser_fallback:
+  enabled: true
+  headless: false
+  max_scrolls: 240
+  idle_rounds: 8
+  wait_timeout_seconds: 600
+
+cookies:
+  msToken: YOUR_MS_TOKEN
+  ttwid: YOUR_TTWID
+  odin_tt: YOUR_ODIN_TT
+  passport_csrf_token: YOUR_CSRF_TOKEN
+  sid_guard: YOUR_SID_GUARD
+
+# Immich upload configuration
+immich:
+  enabled: false
+  api_url: http://host.docker.internal:2283
+  api_key: "YOUR_IMMICH_API_KEY"
+  device_id: douyin-downloader
+  album_prefix: "douyin-"
+  upload_timeout: 600
+
+# Telegram push configuration
+telegram:
+  enabled: false
+  bot_token: "YOUR_BOT_TOKEN"
+  chat_id: "YOUR_CHAT_ID"
+  api_base: ""  # Leave empty to use official API, or set to local Bot API server URL
+  send_cover: true
+  caption_template: "<b>{author}:</b> {desc}"
