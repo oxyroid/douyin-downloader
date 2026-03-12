@@ -8,13 +8,14 @@ import asyncio
 import json
 import logging
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import unquote
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
 
@@ -117,7 +118,28 @@ def _find_manifest_entries_by_url(manifest_path: Path, url: str) -> list[dict]:
         logger.warning("Manifest lookup failed: %s", e)
     return entries
 
+
+# -- Custom Exceptions -------------------------------------------------
+class ConfigurationError(Exception):
+    """Raised when configuration loading fails."""
+    pass
+
+
 app = FastAPI(title="Douyin Downloader API", version="2.0.0", default_response_class=UTF8JSONResponse)
+
+
+@app.exception_handler(ConfigurationError)
+async def configuration_error_handler(request, exc: ConfigurationError):
+    """Return a friendly error when configuration is broken."""
+    return JSONResponse(
+        status_code=503,
+        content={
+            "task_id": "",
+            "status": "error",
+            "message": str(exc),
+            "summary": f"Configuration error: {exc}",
+        },
+    )
 
 # -- Singletons --------------------------------------------------------
 _config: Optional[ConfigLoader] = None
@@ -130,26 +152,46 @@ CONFIG_PATH = os.getenv("DY_CONFIG_PATH", "config.yml")
 async def _get_config() -> ConfigLoader:
     global _config
     if _config is None:
-        _config = ConfigLoader(CONFIG_PATH)
+        try:
+            _config = ConfigLoader(CONFIG_PATH)
+        except FileNotFoundError:
+            raise ConfigurationError(
+                f"Config file not found: {CONFIG_PATH}. "
+                "Copy config.example.yml to config.yml first."
+            )
+        except Exception as e:
+            raise ConfigurationError(f"Failed to load config: {e}")
     return _config
 
 
 async def _get_cookie_manager() -> CookieManager:
     global _cookie_manager
     if _cookie_manager is None:
-        config = await _get_config()
-        cookies = config.get_cookies()
-        _cookie_manager = CookieManager()
-        _cookie_manager.set_cookies(cookies)
+        try:
+            config = await _get_config()
+            cookies = config.get_cookies()
+            _cookie_manager = CookieManager()
+            _cookie_manager.set_cookies(cookies)
+        except ConfigurationError:
+            raise
+        except Exception as e:
+            logger.error("Failed to initialize cookie manager: %s", e)
+            raise ConfigurationError(f"Cookie manager initialization failed: {e}")
     return _cookie_manager
 
 
 async def _get_database() -> Optional[Database]:
     global _database
-    config = await _get_config()
-    if config.get("database") and _database is None:
-        _database = Database()
-        await _database.initialize()
+    try:
+        config = await _get_config()
+        if config.get("database") and _database is None:
+            _database = Database()
+            await _database.initialize()
+    except ConfigurationError:
+        raise
+    except Exception as e:
+        logger.warning("Database initialization failed (downloads will still work): %s", e)
+        return None
     return _database
 
 
@@ -178,11 +220,58 @@ class DownloadResponse(BaseModel):
 _tasks: dict[str, dict] = {}
 # URL -> task_id mapping to prevent duplicate downloads
 _url_to_task: dict[str, str] = {}
+# Maximum number of completed tasks to keep in memory
+_MAX_COMPLETED_TASKS = 1000
+
+# -- Metrics -----------------------------------------------------------
+_metrics = {
+    "downloads_total": 0,
+    "downloads_success": 0,
+    "downloads_failed": 0,
+    "downloads_skipped": 0,
+    "immich_uploads_total": 0,
+    "immich_uploads_success": 0,
+    "immich_uploads_failed": 0,
+    "telegram_sends_total": 0,
+    "telegram_sends_success": 0,
+    "telegram_sends_failed": 0,
+    "start_time": time.time(),
+}
 
 
 def _normalize_url(url: str) -> str:
     """Strip trailing slashes and whitespace."""
     return url.strip().rstrip("/")
+
+
+def _cleanup_old_tasks():
+    """Remove oldest completed/failed tasks when we exceed the limit."""
+    completed_tasks = [
+        (tid, info) for tid, info in _tasks.items()
+        if info.get("status") in ("completed", "failed")
+    ]
+    
+    if len(completed_tasks) <= _MAX_COMPLETED_TASKS:
+        return
+    
+    # Sort by completion time (if tracked) or just take first N
+    # Since we don't track time, remove oldest entries (dict is ordered in Python 3.7+)
+    to_remove = len(completed_tasks) - _MAX_COMPLETED_TASKS
+    removed = 0
+    for tid in list(_tasks.keys()):
+        if removed >= to_remove:
+            break
+        if _tasks.get(tid, {}).get("status") in ("completed", "failed"):
+            del _tasks[tid]
+            # Also clean up URL mapping
+            for url, mapped_tid in list(_url_to_task.items()):
+                if mapped_tid == tid:
+                    del _url_to_task[url]
+                    break
+            removed += 1
+    
+    if removed > 0:
+        logger.debug("Cleaned up %d old tasks", removed)
 
 
 def _find_existing_task(url: str) -> Optional[str]:
@@ -251,6 +340,12 @@ async def _run_download(task_id: str, req: DownloadRequest):
                 skipped=result.skipped,
                 message=f"ok {result.success} / fail {result.failed} / skip {result.skipped}",
             )
+            
+            # Update metrics
+            _metrics["downloads_total"] += 1
+            _metrics["downloads_success"] += result.success
+            _metrics["downloads_failed"] += result.failed
+            _metrics["downloads_skipped"] += result.skipped
 
             # -- Collect files produced by this download --
             new_entries = _read_new_manifest_entries(manifest_path, manifest_lines_before)
@@ -280,6 +375,11 @@ async def _run_download(task_id: str, req: DownloadRequest):
                         _tasks[task_id]["message"] += immich_msg
                         _tasks[task_id]["immich"] = immich_stats
                         logger.info("Immich upload done: %s", immich_stats)
+                        
+                        # Update Immich metrics
+                        _metrics["immich_uploads_total"] += uploaded + restored + immich_stats.get("duplicates", 0) + immich_stats.get("failed", 0)
+                        _metrics["immich_uploads_success"] += uploaded + restored
+                        _metrics["immich_uploads_failed"] += immich_stats.get("failed", 0)
                     else:
                         logger.info("No new files to upload to Immich")
                         _tasks[task_id]["immich"] = {
@@ -321,6 +421,11 @@ async def _run_download(task_id: str, req: DownloadRequest):
                         _tasks[task_id]["message"] += tg_msg
                         _tasks[task_id]["telegram"] = tg_stats
                         logger.info("Telegram send done: %s", tg_stats)
+                        
+                        # Update Telegram metrics
+                        _metrics["telegram_sends_total"] += tg_stats.get("sent", 0) + tg_stats.get("failed", 0)
+                        _metrics["telegram_sends_success"] += tg_stats.get("sent", 0)
+                        _metrics["telegram_sends_failed"] += tg_stats.get("failed", 0)
                     else:
                         logger.info("No matching files in manifest for Telegram")
                         _tasks[task_id]["telegram"] = {
@@ -335,6 +440,9 @@ async def _run_download(task_id: str, req: DownloadRequest):
     except Exception as e:
         logger.exception("Download task %s failed", task_id)
         _tasks[task_id].update(status="failed", message=str(e))
+    finally:
+        # Clean up old tasks to prevent memory leak
+        _cleanup_old_tasks()
 
 
 # -- Task helpers ------------------------------------------------------
@@ -370,9 +478,21 @@ async def _submit_task(url: str, req: DownloadRequest) -> DownloadResponse:
     if req.sync:
         await _run_download(task_id, req)
     else:
-        asyncio.create_task(_run_download(task_id, req))
+        # Fire-and-forget with error logging
+        task = asyncio.create_task(_run_download(task_id, req))
+        task.add_done_callback(_handle_task_exception)
 
     return _task_to_response(task_id, url)
+
+
+def _handle_task_exception(task: asyncio.Task):
+    """Log exceptions from background tasks that would otherwise be silently lost."""
+    try:
+        exc = task.exception()
+        if exc:
+            logger.error("Background task failed with exception: %s", exc, exc_info=exc)
+    except asyncio.CancelledError:
+        pass
 
 
 # -- API routes --------------------------------------------------------
@@ -456,17 +576,243 @@ def _build_summary(info: dict) -> str:
 
 @app.get("/health")
 async def health_check():
-    config = await _get_config()
-    immich = get_immich_uploader(config.get("immich", {}))
-    tg = get_telegram_uploader(config.get("telegram", {}))
+    try:
+        config = await _get_config()
+        immich = get_immich_uploader(config.get("immich", {}))
+        tg = get_telegram_uploader(config.get("telegram", {}))
+        cookies = config.get("cookies", {})
+        cookies_status = _check_cookies_status(cookies)
+        return {
+            "status": "ok",
+            "immich_enabled": immich is not None,
+            "telegram_enabled": tg is not None,
+            "cookies_status": cookies_status,
+        }
+    except ConfigurationError as e:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "error",
+                "message": str(e),
+                "immich_enabled": False,
+                "telegram_enabled": False,
+                "cookies_status": {"valid": False, "message": str(e), "missing": []},
+            },
+        )
+
+
+@app.get("/health/deep")
+async def deep_health_check():
+    """Deep health check that tests actual connectivity to Immich and Telegram."""
+    result = {
+        "status": "ok",
+        "checks": {},
+    }
+    
+    try:
+        config = await _get_config()
+        result["checks"]["config"] = {"status": "ok"}
+    except ConfigurationError as e:
+        result["status"] = "degraded"
+        result["checks"]["config"] = {"status": "error", "message": str(e)}
+        return JSONResponse(status_code=503, content=result)
+    
+    # Check cookies
     cookies = config.get("cookies", {})
     cookies_status = _check_cookies_status(cookies)
-    return {
-        "status": "ok",
-        "immich_enabled": immich is not None,
-        "telegram_enabled": tg is not None,
-        "cookies_status": cookies_status,
-    }
+    if cookies_status["valid"]:
+        result["checks"]["cookies"] = {"status": "ok"}
+    else:
+        result["status"] = "degraded"
+        result["checks"]["cookies"] = {"status": "warning", "message": cookies_status["message"]}
+    
+    # Check Immich connectivity
+    immich = get_immich_uploader(config.get("immich", {}))
+    if immich:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(
+                headers={"x-api-key": immich.api_key},
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as session:
+                async with session.get(f"{immich.api_url}/api/server/ping") as resp:
+                    if resp.status == 200:
+                        result["checks"]["immich"] = {"status": "ok", "url": immich.api_url}
+                    else:
+                        result["status"] = "degraded"
+                        result["checks"]["immich"] = {
+                            "status": "error",
+                            "message": f"HTTP {resp.status}",
+                            "url": immich.api_url,
+                        }
+        except Exception as e:
+            result["status"] = "degraded"
+            result["checks"]["immich"] = {
+                "status": "error",
+                "message": str(e),
+                "url": immich.api_url,
+            }
+    else:
+        result["checks"]["immich"] = {"status": "disabled"}
+    
+    # Check Telegram connectivity
+    tg = get_telegram_uploader(config.get("telegram", {}))
+    if tg:
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+                async with session.get(f"{tg._api_url}/getMe") as resp:
+                    body = await resp.json()
+                    if body.get("ok"):
+                        bot_info = body.get("result", {})
+                        result["checks"]["telegram"] = {
+                            "status": "ok",
+                            "bot_username": bot_info.get("username", "unknown"),
+                        }
+                    else:
+                        result["status"] = "degraded"
+                        result["checks"]["telegram"] = {
+                            "status": "error",
+                            "message": body.get("description", "Unknown error"),
+                        }
+        except Exception as e:
+            result["status"] = "degraded"
+            result["checks"]["telegram"] = {"status": "error", "message": str(e)}
+    else:
+        result["checks"]["telegram"] = {"status": "disabled"}
+    
+    status_code = 200 if result["status"] == "ok" else 503
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@app.get("/metrics", response_class=PlainTextResponse)
+async def prometheus_metrics():
+    """Prometheus-compatible metrics endpoint."""
+    uptime = time.time() - _metrics["start_time"]
+    
+    # Count task statuses
+    pending = sum(1 for t in _tasks.values() if t.get("status") == "pending")
+    running = sum(1 for t in _tasks.values() if t.get("status") == "running")
+    completed = sum(1 for t in _tasks.values() if t.get("status") == "completed")
+    failed = sum(1 for t in _tasks.values() if t.get("status") == "failed")
+    
+    lines = [
+        "# HELP douyin_uptime_seconds Server uptime in seconds",
+        "# TYPE douyin_uptime_seconds gauge",
+        f"douyin_uptime_seconds {uptime:.2f}",
+        "",
+        "# HELP douyin_tasks_total Total tasks by status",
+        "# TYPE douyin_tasks_total gauge",
+        f'douyin_tasks_total{{status="pending"}} {pending}',
+        f'douyin_tasks_total{{status="running"}} {running}',
+        f'douyin_tasks_total{{status="completed"}} {completed}',
+        f'douyin_tasks_total{{status="failed"}} {failed}',
+        "",
+        "# HELP douyin_downloads_total Total download operations",
+        "# TYPE douyin_downloads_total counter",
+        f"douyin_downloads_total {_metrics['downloads_total']}",
+        "",
+        "# HELP douyin_downloads_success_total Successful downloads",
+        "# TYPE douyin_downloads_success_total counter",
+        f"douyin_downloads_success_total {_metrics['downloads_success']}",
+        "",
+        "# HELP douyin_downloads_failed_total Failed downloads",
+        "# TYPE douyin_downloads_failed_total counter",
+        f"douyin_downloads_failed_total {_metrics['downloads_failed']}",
+        "",
+        "# HELP douyin_downloads_skipped_total Skipped downloads",
+        "# TYPE douyin_downloads_skipped_total counter",
+        f"douyin_downloads_skipped_total {_metrics['downloads_skipped']}",
+        "",
+        "# HELP douyin_immich_uploads_total Total Immich upload attempts",
+        "# TYPE douyin_immich_uploads_total counter",
+        f"douyin_immich_uploads_total {_metrics['immich_uploads_total']}",
+        "",
+        "# HELP douyin_immich_uploads_success_total Successful Immich uploads",
+        "# TYPE douyin_immich_uploads_success_total counter",
+        f"douyin_immich_uploads_success_total {_metrics['immich_uploads_success']}",
+        "",
+        "# HELP douyin_immich_uploads_failed_total Failed Immich uploads",
+        "# TYPE douyin_immich_uploads_failed_total counter",
+        f"douyin_immich_uploads_failed_total {_metrics['immich_uploads_failed']}",
+        "",
+        "# HELP douyin_telegram_sends_total Total Telegram send attempts",
+        "# TYPE douyin_telegram_sends_total counter",
+        f"douyin_telegram_sends_total {_metrics['telegram_sends_total']}",
+        "",
+        "# HELP douyin_telegram_sends_success_total Successful Telegram sends",
+        "# TYPE douyin_telegram_sends_success_total counter",
+        f"douyin_telegram_sends_success_total {_metrics['telegram_sends_success']}",
+        "",
+        "# HELP douyin_telegram_sends_failed_total Failed Telegram sends",
+        "# TYPE douyin_telegram_sends_failed_total counter",
+        f"douyin_telegram_sends_failed_total {_metrics['telegram_sends_failed']}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+@app.post("/reload-config")
+async def reload_config():
+    """Reload configuration from disk.
+    
+    This resets the config, cookie manager, and uploader singletons,
+    allowing changes to config.yml to take effect without restarting.
+    """
+    global _config, _cookie_manager
+    
+    # Close existing uploaders
+    try:
+        immich = get_immich_uploader()
+        if immich:
+            await immich.close()
+    except Exception as e:
+        logger.warning("Error closing Immich uploader during reload: %s", e)
+    
+    try:
+        tg = get_telegram_uploader()
+        if tg:
+            await tg.close()
+    except Exception as e:
+        logger.warning("Error closing Telegram uploader during reload: %s", e)
+    
+    # Reset singletons
+    _config = None
+    _cookie_manager = None
+    
+    # Reset uploader singletons (they use module-level globals)
+    from uploaders import immich as immich_module
+    from uploaders import telegram as telegram_module
+    immich_module._uploader = None
+    telegram_module._uploader = None
+    
+    # Reload config
+    try:
+        config = await _get_config()
+        cookies = config.get("cookies", {})
+        cookies_status = _check_cookies_status(cookies)
+        
+        # Recreate uploaders
+        new_immich = get_immich_uploader(config.get("immich", {}))
+        new_tg = get_telegram_uploader(config.get("telegram", {}))
+        
+        logger.info("Configuration reloaded successfully")
+        return {
+            "status": "ok",
+            "message": "Configuration reloaded",
+            "immich_enabled": new_immich is not None,
+            "telegram_enabled": new_tg is not None,
+            "cookies_status": cookies_status,
+        }
+    except ConfigurationError as e:
+        logger.error("Configuration reload failed: %s", e)
+        return JSONResponse(
+            status_code=500,
+            content={
+                "status": "error",
+                "message": f"Reload failed: {e}",
+            },
+        )
 
 
 def _check_cookies_status(cookies: dict) -> dict:
@@ -501,9 +847,12 @@ def _check_cookies_status(cookies: dict) -> dict:
 @app.get("/init")
 async def init_info():
     """Return initialization instructions for first-time setup."""
-    config = await _get_config()
-    cookies = config.get("cookies", {})
-    cookies_status = _check_cookies_status(cookies)
+    try:
+        config = await _get_config()
+        cookies = config.get("cookies", {})
+        cookies_status = _check_cookies_status(cookies)
+    except ConfigurationError as e:
+        cookies_status = {"valid": False, "message": str(e), "missing": []}
     
     return {
         "cookies_status": cookies_status,
@@ -593,35 +942,50 @@ async def reset_downloads():
 @app.on_event("startup")
 async def startup_event():
     """Check cookies status on startup and log warnings if not configured."""
-    config = await _get_config()
-    cookies = config.get("cookies", {})
-    status = _check_cookies_status(cookies)
-    
-    if not status["valid"]:
-        logger.warning("=" * 60)
-        logger.warning("  ⚠️  COOKIES NOT CONFIGURED")
-        logger.warning("=" * 60)
-        logger.warning(status["message"])
-        logger.warning("")
-        logger.warning("To initialize cookies, run on your HOST machine:")
-        logger.warning("  pip install playwright pyyaml")
-        logger.warning("  playwright install chromium")
-        logger.warning("  python scripts/init-cookies.py")
-        logger.warning("")
-        logger.warning("Or visit: http://localhost:8000/init for detailed instructions.")
-        logger.warning("=" * 60)
-    else:
-        logger.info("✅ Cookies configured and ready.")
+    try:
+        config = await _get_config()
+        cookies = config.get("cookies", {})
+        status = _check_cookies_status(cookies)
+        
+        if not status["valid"]:
+            logger.warning("=" * 60)
+            logger.warning("  ⚠️  COOKIES NOT CONFIGURED")
+            logger.warning("=" * 60)
+            logger.warning(status["message"])
+            logger.warning("")
+            logger.warning("To initialize cookies, run on your HOST machine:")
+            logger.warning("  pip install playwright pyyaml")
+            logger.warning("  playwright install chromium")
+            logger.warning("  python scripts/init-cookies.py")
+            logger.warning("")
+            logger.warning("Or visit: http://localhost:8000/init for detailed instructions.")
+            logger.warning("=" * 60)
+        else:
+            logger.info("✅ Cookies configured and ready.")
+    except ConfigurationError as e:
+        logger.error("=" * 60)
+        logger.error("  ❌  CONFIGURATION ERROR")
+        logger.error("=" * 60)
+        logger.error(str(e))
+        logger.error("=" * 60)
+        # Don't raise - let the server start so /health and /init can provide guidance
 
 
 @app.on_event("shutdown")
 async def shutdown_event():
-    immich = get_immich_uploader()
-    if immich:
-        await immich.close()
-    tg = get_telegram_uploader()
-    if tg:
-        await tg.close()
+    try:
+        immich = get_immich_uploader()
+        if immich:
+            await immich.close()
+    except Exception as e:
+        logger.warning("Error closing Immich uploader: %s", e)
+    
+    try:
+        tg = get_telegram_uploader()
+        if tg:
+            await tg.close()
+    except Exception as e:
+        logger.warning("Error closing Telegram uploader: %s", e)
 
 
 if __name__ == "__main__":

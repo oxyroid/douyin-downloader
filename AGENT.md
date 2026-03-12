@@ -79,8 +79,17 @@ All endpoints return JSON with a `summary` field for iOS Shortcuts:
 # Quick test
 curl "http://localhost:8000/d?url=https://v.douyin.com/xxx&sync=1"
 
-# Health check
+# Health check (basic)
 curl http://localhost:8000/health
+
+# Health check (deep - tests Immich/Telegram connectivity)
+curl http://localhost:8000/health/deep
+
+# Prometheus metrics
+curl http://localhost:8000/metrics
+
+# Reload config without restart
+curl -X POST http://localhost:8000/reload-config
 
 # Reset all downloads
 curl http://localhost:8000/reset

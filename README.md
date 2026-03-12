@@ -157,6 +157,52 @@ curl http://localhost:8000/task/a1b2c3d4e5f6
 curl http://localhost:8000/health
 ```
 
+### GET `/health/deep`
+
+Deep health check that tests actual connectivity to Immich and Telegram.
+
+```bash
+curl http://localhost:8000/health/deep
+```
+
+**Response example:**
+
+```json
+{
+    "status": "ok",
+    "checks": {
+        "config": {"status": "ok"},
+        "cookies": {"status": "ok"},
+        "immich": {"status": "ok", "url": "http://immich:2283"},
+        "telegram": {"status": "ok", "bot_username": "my_bot"}
+    }
+}
+```
+
+### GET `/metrics`
+
+Prometheus-compatible metrics endpoint.
+
+```bash
+curl http://localhost:8000/metrics
+```
+
+### POST `/reload-config`
+
+Reload configuration without restarting the container.
+
+```bash
+curl -X POST http://localhost:8000/reload-config
+```
+
+### GET `/init`
+
+Get initialization instructions and cookie status.
+
+```bash
+curl http://localhost:8000/init
+```
+
 ### GET/POST `/reset`
 
 Clear downloads and DB. Next request re-downloads everything.
@@ -197,3 +243,7 @@ Restart after changes: `docker compose restart`
 - [jiji262/douyin-downloader](https://github.com/jiji262/douyin-downloader)
 - [Immich](https://immich.app/)
 - [Telegram Bot API](https://core.telegram.org/bots/api)
+
+---
+
+🤖 This project is 100% built with **Claude Opus 4.5** + **GitHub Copilot**.

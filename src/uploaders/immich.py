@@ -172,56 +172,57 @@ class ImmichUploader:
         session = await self._get_session()
         url = f"{self.api_url}/api/assets"
 
-        data = aiohttp.FormData()
-        data.add_field(
-            "assetData",
-            open(file_path, "rb"),
-            filename=file_path.name,
-            content_type="application/octet-stream",
-        )
-        data.add_field("deviceAssetId", f"{self.device_id}-{file_path.name}")
-        data.add_field("deviceId", self.device_id)
-        data.add_field("fileCreatedAt", created_at)
-        data.add_field("fileModifiedAt", modified_at)
-
         try:
-            async with session.post(url, data=data) as resp:
-                body = await resp.json()
+            with open(file_path, "rb") as f:
+                data = aiohttp.FormData()
+                data.add_field(
+                    "assetData",
+                    f,
+                    filename=file_path.name,
+                    content_type="application/octet-stream",
+                )
+                data.add_field("deviceAssetId", f"{self.device_id}-{file_path.name}")
+                data.add_field("deviceId", self.device_id)
+                data.add_field("fileCreatedAt", created_at)
+                data.add_field("fileModifiedAt", modified_at)
 
-                if resp.status in (200, 201):
-                    status = body.get("status", "unknown")
-                    asset_id = body.get("id", "")
-                    if resp.status == 201:
-                        logger.info(
-                            "Uploaded to Immich: %s (asset_id=%s)",
-                            file_path.name,
-                            asset_id,
-                        )
+                async with session.post(url, data=data) as resp:
+                    body = await resp.json()
+
+                    if resp.status in (200, 201):
+                        status = body.get("status", "unknown")
+                        asset_id = body.get("id", "")
+                        if resp.status == 201:
+                            logger.info(
+                                "Uploaded to Immich: %s (asset_id=%s)",
+                                file_path.name,
+                                asset_id,
+                            )
+                        else:
+                            # 200 = duplicate
+                            if force and asset_id:
+                                restored = await self._restore_from_trash(asset_id)
+                                if restored:
+                                    logger.info(
+                                        "Duplicate but restored from trash: %s (asset_id=%s)",
+                                        file_path.name,
+                                        asset_id,
+                                    )
+                                    return {"status": "restored", "id": asset_id, "http": resp.status}
+                            logger.info(
+                                "Duplicate, skipped: %s (asset_id=%s)",
+                                file_path.name,
+                                asset_id,
+                            )
+                        return {"status": status, "id": asset_id, "http": resp.status}
                     else:
-                        # 200 = duplicate
-                        if force and asset_id:
-                            restored = await self._restore_from_trash(asset_id)
-                            if restored:
-                                logger.info(
-                                    "Duplicate but restored from trash: %s (asset_id=%s)",
-                                    file_path.name,
-                                    asset_id,
-                                )
-                                return {"status": "restored", "id": asset_id, "http": resp.status}
-                        logger.info(
-                            "Duplicate, skipped: %s (asset_id=%s)",
+                        logger.error(
+                            "Immich upload failed [%d]: %s -> %s",
+                            resp.status,
                             file_path.name,
-                            asset_id,
+                            body,
                         )
-                    return {"status": status, "id": asset_id, "http": resp.status}
-                else:
-                    logger.error(
-                        "Immich upload failed [%d]: %s -> %s",
-                        resp.status,
-                        file_path.name,
-                        body,
-                    )
-                    return {"status": "error", "http": resp.status, "detail": body}
+                        return {"status": "error", "http": resp.status, "detail": body}
         except Exception as e:
             logger.exception("Immich upload error: %s", file_path.name)
             return {"status": "error", "detail": str(e)}

@@ -199,60 +199,67 @@ class TelegramUploader:
         # Covers (images) first, videos after
         sorted_files = sorted(files, key=lambda f: (f.suffix.lower() in _VIDEO_EXTENSIONS, f.name))
 
-        data = aiohttp.FormData()
-        data.add_field("chat_id", self.chat_id)
-        data.add_field("disable_notification", "true")
-
-        media_items = []
-        for i, file_path in enumerate(sorted_files):
-            attach_key = f"file{i}"
-            suffix = file_path.suffix.lower()
-
-            if suffix in _VIDEO_EXTENSIONS:
-                media_type = "video"
-            else:
-                media_type = "photo"
-
-            item = {
-                "type": media_type,
-                "media": f"attach://{attach_key}",
-            }
-
-            # Include width/height for videos to prevent square preview
-            if media_type == "video":
-                w, h = _get_video_dimensions(file_path)
-                if w > 0 and h > 0:
-                    item["width"] = w
-                    item["height"] = h
-                thumb = _find_thumbnail(file_path)
-                if thumb:
-                    thumb_key = f"thumb{i}"
-                    item["thumbnail"] = f"attach://{thumb_key}"
-                    data.add_field(
-                        thumb_key,
-                        open(thumb, "rb"),
-                        filename=thumb.name,
-                        content_type="image/jpeg",
-                    )
-
-            # Caption on the first item only
-            if i == 0 and caption:
-                item["caption"] = caption
-                item["parse_mode"] = "HTML"
-
-            media_items.append(item)
-
-            content_type = "video/mp4" if media_type == "video" else "image/jpeg"
-            data.add_field(
-                attach_key,
-                open(file_path, "rb"),
-                filename=file_path.name,
-                content_type=content_type,
-            )
-
-        data.add_field("media", json.dumps(media_items))
-
+        # Collect file handles for proper cleanup
+        file_handles: list = []
+        
         try:
+            data = aiohttp.FormData()
+            data.add_field("chat_id", self.chat_id)
+            data.add_field("disable_notification", "true")
+
+            media_items = []
+            for i, file_path in enumerate(sorted_files):
+                attach_key = f"file{i}"
+                suffix = file_path.suffix.lower()
+
+                if suffix in _VIDEO_EXTENSIONS:
+                    media_type = "video"
+                else:
+                    media_type = "photo"
+
+                item = {
+                    "type": media_type,
+                    "media": f"attach://{attach_key}",
+                }
+
+                # Include width/height for videos to prevent square preview
+                if media_type == "video":
+                    w, h = _get_video_dimensions(file_path)
+                    if w > 0 and h > 0:
+                        item["width"] = w
+                        item["height"] = h
+                    thumb = _find_thumbnail(file_path)
+                    if thumb:
+                        thumb_key = f"thumb{i}"
+                        item["thumbnail"] = f"attach://{thumb_key}"
+                        thumb_handle = open(thumb, "rb")
+                        file_handles.append(thumb_handle)
+                        data.add_field(
+                            thumb_key,
+                            thumb_handle,
+                            filename=thumb.name,
+                            content_type="image/jpeg",
+                        )
+
+                # Caption on the first item only
+                if i == 0 and caption:
+                    item["caption"] = caption
+                    item["parse_mode"] = "HTML"
+
+                media_items.append(item)
+
+                content_type = "video/mp4" if media_type == "video" else "image/jpeg"
+                file_handle = open(file_path, "rb")
+                file_handles.append(file_handle)
+                data.add_field(
+                    attach_key,
+                    file_handle,
+                    filename=file_path.name,
+                    content_type=content_type,
+                )
+
+            data.add_field("media", json.dumps(media_items))
+
             async with session.post(url, data=data) as resp:
                 body = await resp.json()
                 if body.get("ok"):
@@ -266,6 +273,13 @@ class TelegramUploader:
         except Exception as e:
             logger.exception("MediaGroup error")
             return {"status": "error", "type": "media_group", "detail": str(e)}
+        finally:
+            # Ensure all file handles are closed
+            for fh in file_handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     async def _send_single(self, file_path: Path, caption: str = "") -> dict:
         """Send a single file (silent).
@@ -295,36 +309,43 @@ class TelegramUploader:
             method, field_name, content_type = "sendDocument", "document", "application/octet-stream"
 
         url = f"{self._api_url}/{method}"
-        data = aiohttp.FormData()
-        data.add_field("chat_id", self.chat_id)
-        data.add_field("disable_notification", "true")
-        data.add_field(
-            field_name,
-            open(file_path, "rb"),
-            filename=file_path.name,
-            content_type=content_type,
-        )
-
-        # Video: attach width/height and thumbnail
-        if method == "sendVideo":
-            w, h = _get_video_dimensions(file_path)
-            if w > 0 and h > 0:
-                data.add_field("width", str(w))
-                data.add_field("height", str(h))
-            thumb = _find_thumbnail(file_path)
-            if thumb:
-                data.add_field(
-                    "thumbnail",
-                    open(thumb, "rb"),
-                    filename=thumb.name,
-                    content_type="image/jpeg",
-                )
-
-        if caption:
-            data.add_field("caption", caption)
-            data.add_field("parse_mode", "HTML")
-
+        file_handles: list = []
+        
         try:
+            data = aiohttp.FormData()
+            data.add_field("chat_id", self.chat_id)
+            data.add_field("disable_notification", "true")
+            
+            file_handle = open(file_path, "rb")
+            file_handles.append(file_handle)
+            data.add_field(
+                field_name,
+                file_handle,
+                filename=file_path.name,
+                content_type=content_type,
+            )
+
+            # Video: attach width/height and thumbnail
+            if method == "sendVideo":
+                w, h = _get_video_dimensions(file_path)
+                if w > 0 and h > 0:
+                    data.add_field("width", str(w))
+                    data.add_field("height", str(h))
+                thumb = _find_thumbnail(file_path)
+                if thumb:
+                    thumb_handle = open(thumb, "rb")
+                    file_handles.append(thumb_handle)
+                    data.add_field(
+                        "thumbnail",
+                        thumb_handle,
+                        filename=thumb.name,
+                        content_type="image/jpeg",
+                    )
+
+            if caption:
+                data.add_field("caption", caption)
+                data.add_field("parse_mode", "HTML")
+
             async with session.post(url, data=data) as resp:
                 body = await resp.json()
                 if body.get("ok"):
@@ -340,6 +361,12 @@ class TelegramUploader:
         except Exception as e:
             logger.exception("%s error: %s", method, file_path.name)
             return {"status": "error", "type": field_name, "file": file_path.name, "detail": str(e)}
+        finally:
+            for fh in file_handles:
+                try:
+                    fh.close()
+                except Exception:
+                    pass
 
     async def upload_files(
         self,
