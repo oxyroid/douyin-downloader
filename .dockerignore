@@ -1,11 +1,33 @@
+# Git
 .git
-app/myenv
-app/Downloaded
-app/__pycache__
-app/**/__pycache__
-downloads
-data
+.gitignore
+.gitmodules
+
+# IDE
+.idea
+.vscode
+
+# Python cache
+__pycache__
+**/__pycache__
 *.pyc
+*.pyo
+
+# Database
 *.db
+
+# Downloads (mounted as volume)
+downloads
+
+# Scripts (host-only, for cookie init)
+scripts
+
+# Config (mounted as volume)
+config.yml
+
+# macOS
 .DS_Store
-.env
+
+# Documentation
+README.md
+*.md

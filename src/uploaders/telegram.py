@@ -97,7 +97,8 @@ class TelegramUploader:
         """
         self.bot_token = bot_token
         self.chat_id = chat_id
-        self.api_base = api_base.rstrip("/")
+        # Default to official API if api_base is empty
+        self.api_base = (api_base or "https://api.telegram.org").rstrip("/")
         self.upload_timeout = upload_timeout
         self.caption_template = caption_template
         self.send_cover = send_cover
@@ -106,9 +107,30 @@ class TelegramUploader:
         )
         self._session: Optional[aiohttp.ClientSession] = None
 
-        # Self-hosted Bot API Server = local mode
-        self.is_local = api_base.rstrip("/") != "https://api.telegram.org"
+        # Self-hosted Bot API Server = local mode (non-official URL)
+        self.is_local = self.api_base != "https://api.telegram.org"
         self.max_file_size = _MAX_FILE_SIZE_LOCAL if self.is_local else _MAX_FILE_SIZE_OFFICIAL
+
+    def _log_size_limit_hint(self, file_name: str, file_mb: int):
+        """Log a warning with configuration hints when file exceeds official API limit."""
+        limit_mb = self.max_file_size // (1024 * 1024)
+        if not self.is_local:
+            logger.warning(
+                "File exceeds %d MB limit (official Telegram API), skipping: %s (%d MB)",
+                limit_mb, file_name, file_mb,
+            )
+            logger.warning(
+                "  TIP: To upload files up to 2GB, configure a self-hosted Bot API Server in config.yml:"
+            )
+            logger.warning("    telegram:")
+            logger.warning("      api_base: 'http://your-bot-api-server:8081'")
+            logger.warning("      api_id: 'your_api_id'      # Get from https://my.telegram.org")
+            logger.warning("      api_hash: 'your_api_hash'")
+        else:
+            logger.warning(
+                "File exceeds %d MB limit, skipping: %s (%d MB)",
+                limit_mb, file_name, file_mb,
+            )
 
     @property
     def _api_url(self) -> str:
@@ -259,12 +281,9 @@ class TelegramUploader:
         file_size = file_path.stat().st_size
 
         if file_size > self.max_file_size:
-            limit_mb = self.max_file_size // (1024 * 1024)
-            logger.warning(
-                "File exceeds %d MB limit, skipping: %s (%d MB)",
-                limit_mb, file_path.name, file_size // (1024 * 1024),
-            )
-            return {"status": "skipped", "reason": "file_too_large"}
+            file_mb = file_size // (1024 * 1024)
+            self._log_size_limit_hint(file_path.name, file_mb)
+            return {"status": "skipped", "reason": "file_too_large", "file_size_mb": file_mb, "limit_mb": self.max_file_size // (1024 * 1024)}
 
         session = await self._get_session()
 
@@ -385,8 +404,8 @@ class TelegramUploader:
             group_ok: list[Path] = []
             for f in group_files:
                 if f.stat().st_size > self.max_file_size:
-                    limit_mb = self.max_file_size // (1024 * 1024)
-                    logger.warning("Exceeds %d MB, skipping: %s (%d MB)", limit_mb, f.name, f.stat().st_size // (1024 * 1024))
+                    file_mb = f.stat().st_size // (1024 * 1024)
+                    self._log_size_limit_hint(f.name, file_mb)
                     stats["skipped"] += 1
                 else:
                     group_ok.append(f)

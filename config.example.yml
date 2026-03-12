@@ -80,9 +80,11 @@ telegram:
   enabled: false
   bot_token: "YOUR_BOT_TOKEN"
   chat_id: "YOUR_CHAT_ID"
-  api_base: ""  # Leave empty to use official API, or set to local Bot API server URL
   send_cover: true
   caption_template: "<b>{author}:</b> {desc}"
-  # Telegram API credentials (for future Telethon/Pyrogram support)
-  # api_id: ""
-  # api_hash: ""
+  # Optional: Self-hosted Bot API Server for uploading files >50MB (up to 2GB)
+  # Leave api_base empty to use official Telegram API (50MB limit)
+  # Get api_id/api_hash from https://my.telegram.org if using self-hosted server
+  api_base: ""
+  api_id: ""
+  api_hash: ""

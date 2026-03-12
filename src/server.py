@@ -459,10 +459,70 @@ async def health_check():
     config = await _get_config()
     immich = get_immich_uploader(config.get("immich", {}))
     tg = get_telegram_uploader(config.get("telegram", {}))
+    cookies = config.get("cookies", {})
+    cookies_status = _check_cookies_status(cookies)
     return {
         "status": "ok",
         "immich_enabled": immich is not None,
         "telegram_enabled": tg is not None,
+        "cookies_status": cookies_status,
+    }
+
+
+def _check_cookies_status(cookies: dict) -> dict:
+    """Check if cookies are configured and likely valid."""
+    required_keys = {"msToken", "ttwid", "odin_tt", "passport_csrf_token"}
+    present_keys = {k for k, v in cookies.items() if v and not v.startswith("YOUR_")}
+    missing_keys = required_keys - present_keys
+    
+    # Check if cookies look like placeholders
+    placeholder_keys = {k for k, v in cookies.items() if v and v.startswith("YOUR_")}
+    
+    if not present_keys or placeholder_keys:
+        return {
+            "valid": False,
+            "message": "Cookies not configured. Run init-cookies.py first.",
+            "missing": list(missing_keys | placeholder_keys),
+        }
+    elif missing_keys:
+        return {
+            "valid": False,
+            "message": f"Missing required cookies: {', '.join(sorted(missing_keys))}",
+            "missing": list(missing_keys),
+        }
+    else:
+        return {
+            "valid": True,
+            "message": "Cookies configured",
+            "missing": [],
+        }
+
+
+@app.get("/init")
+async def init_info():
+    """Return initialization instructions for first-time setup."""
+    config = await _get_config()
+    cookies = config.get("cookies", {})
+    cookies_status = _check_cookies_status(cookies)
+    
+    return {
+        "cookies_status": cookies_status,
+        "instructions": {
+            "step1": "Install dependencies on your HOST machine (not in Docker):",
+            "step1_commands": [
+                "pip install playwright pyyaml",
+                "playwright install chromium",
+            ],
+            "step2": "Run the cookie initialization script:",
+            "step2_commands": [
+                "python scripts/init-cookies.py",
+            ],
+            "step3": "Restart the Docker container:",
+            "step3_commands": [
+                "docker compose up -d --build --force-recreate",
+            ],
+            "note": "The script will open a browser for you to log in to Douyin. After logging in, press Enter in the terminal to save cookies.",
+        },
     }
 
 
@@ -528,6 +588,30 @@ async def reset_downloads():
     result["summary"] = "\n".join(parts)
 
     return result
+
+
+@app.on_event("startup")
+async def startup_event():
+    """Check cookies status on startup and log warnings if not configured."""
+    config = await _get_config()
+    cookies = config.get("cookies", {})
+    status = _check_cookies_status(cookies)
+    
+    if not status["valid"]:
+        logger.warning("=" * 60)
+        logger.warning("  ⚠️  COOKIES NOT CONFIGURED")
+        logger.warning("=" * 60)
+        logger.warning(status["message"])
+        logger.warning("")
+        logger.warning("To initialize cookies, run on your HOST machine:")
+        logger.warning("  pip install playwright pyyaml")
+        logger.warning("  playwright install chromium")
+        logger.warning("  python scripts/init-cookies.py")
+        logger.warning("")
+        logger.warning("Or visit: http://localhost:8000/init for detailed instructions.")
+        logger.warning("=" * 60)
+    else:
+        logger.info("✅ Cookies configured and ready.")
 
 
 @app.on_event("shutdown")
