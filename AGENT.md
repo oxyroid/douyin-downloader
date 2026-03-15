@@ -125,3 +125,7 @@ git submodule update --remote app
 # Check git status (should show nothing in app/)
 git status
 ```
+
+## Style Guidelines
+
+- **English only in code and UI-facing strings.** This is an English-language project. Do not use Chinese or other non-English text in code, comments, button labels, captions, log messages, or any user-facing strings. Use emoji or universal symbols when words aren't needed.

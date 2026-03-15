@@ -147,11 +147,11 @@ class TelegramUploader:
         if self._session and not self._session.closed:
             await self._session.close()
 
-    def _build_caption(self, entry: dict) -> str:
-        """Build a caption from a manifest entry.
+    def _build_caption(self, entry: dict) -> tuple[str, str]:
+        """Build a caption and original link from a manifest entry.
 
         Markdown-style **bold** and _italic_ in the template are converted to HTML tags.
-        A link to the original Douyin video is appended at the end.
+        Returns (caption, original_url) where original_url may be empty.
         """
         desc = entry.get("desc", "")
         author = entry.get("author_name", "")
@@ -172,26 +172,52 @@ class TelegramUploader:
         # _text_ → <i>text</i>  (avoid matching underscores inside HTML tags)
         caption = re.sub(r'(?<!\w)_(.+?)_(?!\w)', r'<i>\1</i>', caption)
 
-        # Append original Douyin video link
+        # Original Douyin video link (shown as inline button, not in caption)
+        original_url = ""
         aweme_id = entry.get("aweme_id", "")
         if aweme_id:
-            link = f"https://www.douyin.com/video/{aweme_id}"
-            caption += f' <a href="{link}">🔗</a>'
+            original_url = f"https://www.douyin.com/video/{aweme_id}"
 
         # Telegram caption limit: 1024 chars
         if len(caption) > 1024:
             caption = caption[:1021] + "..."
 
-        return caption
+        return caption, original_url
+
+    @staticmethod
+    def _build_reply_markup(url: str) -> str:
+        """Build an InlineKeyboardMarkup JSON string with a single URL button."""
+        return json.dumps({
+            "inline_keyboard": [[{"text": "🔗", "url": url}]]
+        })
+
+    async def _edit_reply_markup(self, message_id: int, url: str):
+        """Attach an inline keyboard button to an already-sent message."""
+        try:
+            session = await self._get_session()
+            edit_url = f"{self._api_url}/editMessageReplyMarkup"
+            payload = {
+                "chat_id": self.chat_id,
+                "message_id": message_id,
+                "reply_markup": self._build_reply_markup(url),
+            }
+            async with session.post(edit_url, json=payload) as resp:
+                body = await resp.json()
+                if not body.get("ok"):
+                    logger.warning("editMessageReplyMarkup failed: %s", body.get("description"))
+        except Exception as e:
+            logger.warning("Failed to attach inline button: %s", e)
 
     async def _send_media_group(
-        self, files: list[Path], caption: str = ""
+        self, files: list[Path], caption: str = "", reply_url: str = ""
     ) -> dict:
         """Send multiple files as a single MediaGroup message.
 
         Caption is attached to the first item only.
         Cover images are placed before videos.
         Telegram limit: 2–10 media items per group.
+        If reply_url is provided, an inline keyboard button is added to the
+        first message via editMessageReplyMarkup after sending.
         """
         session = await self._get_session()
         url = f"{self._api_url}/sendMediaGroup"
@@ -265,6 +291,15 @@ class TelegramUploader:
                 if body.get("ok"):
                     names = [f.name for f in sorted_files]
                     logger.info("Sent MediaGroup (%d files): %s", len(sorted_files), names)
+
+                    # Attach inline button to the first message in the group
+                    if reply_url:
+                        messages = body.get("result", [])
+                        if messages:
+                            first_msg_id = messages[0].get("message_id")
+                            if first_msg_id:
+                                await self._edit_reply_markup(first_msg_id, reply_url)
+
                     return {"status": "sent", "type": "media_group", "count": len(sorted_files)}
                 else:
                     error_desc = body.get("description", "unknown error")
@@ -281,11 +316,12 @@ class TelegramUploader:
                 except Exception:
                     pass
 
-    async def _send_single(self, file_path: Path, caption: str = "") -> dict:
+    async def _send_single(self, file_path: Path, caption: str = "", reply_url: str = "") -> dict:
         """Send a single file (silent).
 
         Picks sendVideo / sendPhoto / sendDocument based on extension.
         Files exceeding the size limit are skipped (50 MB official / 2 GB local).
+        If reply_url is provided, an inline keyboard button is attached.
         """
         if not file_path.exists():
             logger.warning("File not found, skipping: %s", file_path)
@@ -345,6 +381,9 @@ class TelegramUploader:
             if caption:
                 data.add_field("caption", caption)
                 data.add_field("parse_mode", "HTML")
+
+            if reply_url:
+                data.add_field("reply_markup", self._build_reply_markup(reply_url))
 
             async with session.post(url, data=data) as resp:
                 body = await resp.json()
@@ -426,7 +465,10 @@ class TelegramUploader:
 
         # Send grouped files
         for aweme_id, group_files in aweme_groups.items():
-            caption = self._build_caption(entry_map[aweme_id]) if aweme_id in entry_map else ""
+            caption = ""
+            reply_url = ""
+            if aweme_id in entry_map:
+                caption, reply_url = self._build_caption(entry_map[aweme_id])
 
             group_ok: list[Path] = []
             for f in group_files:
@@ -438,13 +480,13 @@ class TelegramUploader:
                     group_ok.append(f)
 
             if len(group_ok) >= 2:
-                result = await self._send_media_group(group_ok, caption)
+                result = await self._send_media_group(group_ok, caption, reply_url)
                 if result.get("status") == "sent":
                     stats["sent"] += result.get("count", len(group_ok))
                 else:
                     stats["failed"] += len(group_ok)
             elif len(group_ok) == 1:
-                result = await self._send_single(group_ok[0], caption)
+                result = await self._send_single(group_ok[0], caption, reply_url)
                 if result.get("status") == "sent":
                     stats["sent"] += 1
                 else:
