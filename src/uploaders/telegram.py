@@ -36,6 +36,47 @@ _VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".mkv", ".webm"}
 _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"}
 
 
+def _ensure_faststart(file_path: Path) -> Path:
+    """Re-mux the video with moov atom at the front for streaming playback.
+
+    If the file is already faststart or ffmpeg fails, return the original path.
+    """
+    if file_path.suffix.lower() not in _VIDEO_EXTENSIONS:
+        return file_path
+
+    tmp_path = file_path.with_suffix(f".faststart{file_path.suffix}")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(file_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(tmp_path),
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode == 0 and tmp_path.exists() and tmp_path.stat().st_size > 0:
+            tmp_path.replace(file_path)
+            logger.info("Faststart applied: %s", file_path.name)
+            return file_path
+        else:
+            logger.warning("Faststart remux failed (rc=%d): %s", result.returncode, file_path.name)
+            if tmp_path.exists():
+                tmp_path.unlink()
+            return file_path
+    except subprocess.TimeoutExpired:
+        logger.warning("Faststart remux timed out: %s", file_path.name)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return file_path
+    except Exception as e:
+        logger.warning("Faststart remux error: %s -> %s", file_path.name, e)
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return file_path
+
+
 def _get_video_dimensions(file_path: Path) -> tuple[int, int]:
     """Return (width, height) via ffprobe, or (0, 0) on failure."""
     try:
@@ -55,6 +96,41 @@ def _get_video_dimensions(file_path: Path) -> tuple[int, int]:
     except Exception:
         pass
     return 0, 0
+
+
+def _make_thumbnail(source: Path) -> Optional[Path]:
+    """Create a 320px-max JPEG thumbnail from a cover image.
+
+    Telegram requires thumbnails to be JPEG, < 200 kB, with both
+    width and height not exceeding 320 pixels.  Returns the path to
+    the generated thumbnail, or None on failure.
+    """
+    thumb_path = source.with_suffix(".thumb.jpg")
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(source),
+                "-vf", "scale=320:320:force_original_aspect_ratio=decrease",
+                "-frames:v", "1",
+                "-q:v", "5",
+                str(thumb_path),
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+            # Ensure under 200 kB
+            if thumb_path.stat().st_size > 200 * 1024:
+                thumb_path.unlink()
+                return None
+            return thumb_path
+        if thumb_path.exists():
+            thumb_path.unlink()
+    except Exception as e:
+        logger.debug("Thumbnail generation failed: %s -> %s", source.name, e)
+        if thumb_path.exists():
+            thumb_path.unlink()
+    return None
 
 
 def _find_thumbnail(video_path: Path) -> Optional[Path]:
@@ -240,6 +316,8 @@ class TelegramUploader:
 
                 if suffix in _VIDEO_EXTENSIONS:
                     media_type = "video"
+                    # Ensure moov atom is at front for streaming playback
+                    _ensure_faststart(file_path)
                 else:
                     media_type = "photo"
 
@@ -248,24 +326,39 @@ class TelegramUploader:
                     "media": f"attach://{attach_key}",
                 }
 
-                # Include width/height for videos to prevent square preview
+                # Video metadata for correct preview rendering
                 if media_type == "video":
+                    item["supports_streaming"] = True
                     w, h = _get_video_dimensions(file_path)
                     if w > 0 and h > 0:
                         item["width"] = w
                         item["height"] = h
-                    thumb = _find_thumbnail(file_path)
-                    if thumb:
-                        thumb_key = f"thumb{i}"
-                        item["thumbnail"] = f"attach://{thumb_key}"
-                        thumb_handle = open(thumb, "rb")
-                        file_handles.append(thumb_handle)
+                    cover_path = _find_thumbnail(file_path)
+                    if cover_path:
+                        # Full-size cover for the message
+                        cover_key = f"cover{i}"
+                        item["cover"] = f"attach://{cover_key}"
+                        cover_handle = open(cover_path, "rb")
+                        file_handles.append(cover_handle)
                         data.add_field(
-                            thumb_key,
-                            thumb_handle,
-                            filename=thumb.name,
+                            cover_key,
+                            cover_handle,
+                            filename=cover_path.name,
                             content_type="image/jpeg",
                         )
+                        # Resized thumbnail (max 320px per side)
+                        resized = _make_thumbnail(cover_path)
+                        if resized:
+                            thumb_key = f"thumb{i}"
+                            item["thumbnail"] = f"attach://{thumb_key}"
+                            thumb_handle = open(resized, "rb")
+                            file_handles.append(thumb_handle)
+                            data.add_field(
+                                thumb_key,
+                                thumb_handle,
+                                filename=resized.name,
+                                content_type="image/jpeg",
+                            )
 
                 # Caption on the first item only
                 if i == 0 and caption:
@@ -337,6 +430,10 @@ class TelegramUploader:
 
         session = await self._get_session()
 
+        # Ensure video has moov atom at front for streaming playback
+        if suffix in _VIDEO_EXTENSIONS:
+            _ensure_faststart(file_path)
+
         if suffix in _VIDEO_EXTENSIONS:
             method, field_name, content_type = "sendVideo", "video", "video/mp4"
         elif suffix in _IMAGE_EXTENSIONS:
@@ -361,22 +458,35 @@ class TelegramUploader:
                 content_type=content_type,
             )
 
-            # Video: attach width/height and thumbnail
+            # Video: attach width/height, cover, thumbnail, and streaming flag
             if method == "sendVideo":
+                data.add_field("supports_streaming", "true")
                 w, h = _get_video_dimensions(file_path)
                 if w > 0 and h > 0:
                     data.add_field("width", str(w))
                     data.add_field("height", str(h))
-                thumb = _find_thumbnail(file_path)
-                if thumb:
-                    thumb_handle = open(thumb, "rb")
-                    file_handles.append(thumb_handle)
+                cover_path = _find_thumbnail(file_path)
+                if cover_path:
+                    # Full-size cover image
+                    cover_handle = open(cover_path, "rb")
+                    file_handles.append(cover_handle)
                     data.add_field(
-                        "thumbnail",
-                        thumb_handle,
-                        filename=thumb.name,
+                        "cover",
+                        cover_handle,
+                        filename=cover_path.name,
                         content_type="image/jpeg",
                     )
+                    # Resized thumbnail (max 320px per side, < 200 kB)
+                    resized = _make_thumbnail(cover_path)
+                    if resized:
+                        thumb_handle = open(resized, "rb")
+                        file_handles.append(thumb_handle)
+                        data.add_field(
+                            "thumbnail",
+                            thumb_handle,
+                            filename=resized.name,
+                            content_type="image/jpeg",
+                        )
 
             if caption:
                 data.add_field("caption", caption)
